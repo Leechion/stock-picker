@@ -1,0 +1,4 @@
+# 忽略 Vue 和构建产物
+node_modules/
+dist/
+*.local

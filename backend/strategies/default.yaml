@@ -1,0 +1,28 @@
+name: 均衡策略
+description: 技术面 + 基本面 + 情绪面均衡配置
+
+categories:
+  technical: 0.4
+  fundamental: 0.4
+  sentiment: 0.2
+
+factors:
+  technical:
+    ma_crossover: { weight: 0.25 }
+    macd: { weight: 0.25 }
+    rsi: { weight: 0.20 }
+    kdj: { weight: 0.15 }
+    bollinger: { weight: 0.10 }
+    volume_ratio: { weight: 0.05 }
+  fundamental:
+    pe_score: { weight: 0.20 }
+    pb_score: { weight: 0.15 }
+    roe_score: { weight: 0.25 }
+    revenue_growth_score: { weight: 0.20 }
+    profit_growth_score: { weight: 0.15 }
+    debt_ratio_score: { weight: 0.05 }
+  sentiment:
+    turnover_score: { weight: 0.25 }
+    capital_flow_score: { weight: 0.35 }
+    momentum_5d_score: { weight: 0.20 }
+    momentum_20d_score: { weight: 0.20 }

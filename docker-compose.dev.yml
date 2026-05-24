@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  web:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://stock_picker:stock_picker_dev@db:5432/stock_picker
+    volumes:
+      - ./backend:/app
+      - db_data:/app/data
+    depends_on:
+      - db
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    environment:
+      VITE_DEV_PROXY_TARGET: http://web:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - web
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: stock_picker
+      POSTGRES_USER: stock_picker
+      POSTGRES_PASSWORD: stock_picker_dev
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+volumes:
+  pg_data:
+  db_data:
