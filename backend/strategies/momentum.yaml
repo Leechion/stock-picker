@@ -1,0 +1,28 @@
+name: 动量策略
+description: 偏重技术面和情绪面，适合趋势跟踪
+
+categories:
+  technical: 0.45
+  fundamental: 0.2
+  sentiment: 0.35
+
+factors:
+  technical:
+    ma_crossover: { weight: 0.30 }
+    macd: { weight: 0.30 }
+    rsi: { weight: 0.15 }
+    kdj: { weight: 0.10 }
+    bollinger: { weight: 0.10 }
+    volume_ratio: { weight: 0.05 }
+  fundamental:
+    pe_score: { weight: 0.15 }
+    pb_score: { weight: 0.10 }
+    roe_score: { weight: 0.20 }
+    revenue_growth_score: { weight: 0.20 }
+    profit_growth_score: { weight: 0.25 }
+    debt_ratio_score: { weight: 0.10 }
+  sentiment:
+    turnover_score: { weight: 0.30 }
+    capital_flow_score: { weight: 0.40 }
+    momentum_5d_score: { weight: 0.15 }
+    momentum_20d_score: { weight: 0.15 }

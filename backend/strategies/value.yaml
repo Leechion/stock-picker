@@ -1,0 +1,28 @@
+name: 价值策略
+description: 偏重基本面，适合价值投资选股
+
+categories:
+  technical: 0.2
+  fundamental: 0.65
+  sentiment: 0.15
+
+factors:
+  technical:
+    ma_crossover: { weight: 0.30 }
+    macd: { weight: 0.25 }
+    rsi: { weight: 0.20 }
+    kdj: { weight: 0.10 }
+    bollinger: { weight: 0.10 }
+    volume_ratio: { weight: 0.05 }
+  fundamental:
+    pe_score: { weight: 0.25 }
+    pb_score: { weight: 0.20 }
+    roe_score: { weight: 0.30 }
+    revenue_growth_score: { weight: 0.10 }
+    profit_growth_score: { weight: 0.10 }
+    debt_ratio_score: { weight: 0.05 }
+  sentiment:
+    turnover_score: { weight: 0.20 }
+    capital_flow_score: { weight: 0.30 }
+    momentum_5d_score: { weight: 0.25 }
+    momentum_20d_score: { weight: 0.25 }
