@@ -1,7 +1,14 @@
 <template>
   <div class="trading-view">
     <div class="page-header">
-      <h2 class="page-title">模拟交易</h2>
+      <div class="page-title-group">
+        <h2 class="page-title">模拟交易</h2>
+        <span class="page-subtitle">虚拟资金实盘模拟 · 策略回测验证</span>
+      </div>
+      <div class="ws-status">
+        <span class="status-dot" :class="monitor.wsConnected ? 'connected' : 'disconnected'" />
+        <span class="status-text">{{ monitor.wsConnected ? '实时连接' : '连接中...' }}</span>
+      </div>
       <div class="header-actions">
         <el-button
           v-if="!account.is_active"
@@ -169,36 +176,28 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, reactive, onMounted, onBeforeUnmount } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  getTradingAccount,
-  getTradingPositions,
   getTradingLogs,
   startTradingBot,
   stopTradingBot,
   resetTradingAccount,
 } from '@/api/trading'
+import { monitorWs } from '@/utils/websocket'
+import { useMonitorStore } from '@/store'
+
+const monitor = useMonitorStore()
 
 const actionLoading = ref(false)
 const logsLoading = ref(false)
 const logsPage = ref(1)
 const logsTotal = ref(0)
 
-const account = reactive({
-  initial_capital: 500000,
-  cash: 500000,
-  total_value: 500000,
-  position_value: 0,
-  pnl: 0,
-  pnl_pct: 0,
-  is_active: false,
-})
-
-const positions = ref<Record<string, unknown>[]>([])
+// Use store state for reactive account/positions
+const account = monitor.account
+const positions = monitor.positions
 const tradeLogs = ref<Record<string, unknown>[]>([])
-
-let refreshTimer: ReturnType<typeof setInterval> | null = null
 
 function formatMoney(val: number): string {
   if (val == null) return '--'
@@ -220,20 +219,6 @@ function actionTagType(action: string): string {
   return map[action] || ''
 }
 
-async function loadAccount() {
-  try {
-    const { data } = await getTradingAccount()
-    Object.assign(account, data)
-  } catch { /* silent */ }
-}
-
-async function loadPositions() {
-  try {
-    const { data } = await getTradingPositions()
-    positions.value = data || []
-  } catch { positions.value = [] }
-}
-
 async function loadLogs() {
   logsLoading.value = true
   try {
@@ -244,12 +229,25 @@ async function loadLogs() {
   finally { logsLoading.value = false }
 }
 
+function handleWsTrade(data: unknown) {
+  const trade = data as Record<string, unknown>
+  monitor.addTrade(trade)
+  loadLogs()
+}
+
+function handlePositions(data: unknown) {
+  monitor.updatePositions(data as Record<string, unknown>[])
+}
+
+function handleAccount(data: unknown) {
+  monitor.updateAccount(data as Record<string, unknown>)
+}
+
 async function handleStart() {
   actionLoading.value = true
   try {
     await startTradingBot()
     ElMessage.success('交易机器人已启动')
-    account.is_active = true
   } catch { ElMessage.error('启动失败') }
   finally { actionLoading.value = false }
 }
@@ -259,7 +257,6 @@ async function handleStop() {
   try {
     await stopTradingBot()
     ElMessage.success('交易机器人已停止')
-    account.is_active = false
   } catch { ElMessage.error('停止失败') }
   finally { actionLoading.value = false }
 }
@@ -277,31 +274,28 @@ async function handleReset() {
   try {
     await resetTradingAccount()
     ElMessage.success('账户已重置')
-    await loadAll()
+    loadLogs()
   } catch { ElMessage.error('重置失败') }
   finally { actionLoading.value = false }
 }
 
-async function loadAll() {
-  await Promise.all([loadAccount(), loadPositions(), loadLogs()])
-}
-
-function startAutoRefresh() {
-  refreshTimer = setInterval(() => {
-    if (account.is_active) {
-      loadAccount()
-      loadPositions()
-    }
-  }, 30000) // Refresh every 30s when active
-}
-
 onMounted(() => {
-  loadAll()
-  startAutoRefresh()
+  monitorWs.on('open', () => monitor.setWsConnected(true))
+  monitorWs.on('close', () => monitor.setWsConnected(false))
+  monitorWs.on('positions', handlePositions)
+  monitorWs.on('account', handleAccount)
+  monitorWs.on('trades', handleWsTrade)
+  monitorWs.connect()
+  monitorWs.subscribe(['positions', 'account', 'trades'])
+
+  loadLogs()
 })
 
 onBeforeUnmount(() => {
-  if (refreshTimer) clearInterval(refreshTimer)
+  monitorWs.off('positions', handlePositions)
+  monitorWs.off('account', handleAccount)
+  monitorWs.off('trades', handleWsTrade)
+  monitorWs.unsubscribe(['positions', 'account', 'trades'])
 })
 </script>
 
@@ -318,12 +312,24 @@ onBeforeUnmount(() => {
   margin-bottom: 20px;
 }
 
+.page-title-group {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
 .page-title {
   margin: 0;
-  font-size: 20px;
-  font-weight: 600;
+  font-size: 22px;
+  font-weight: 700;
   color: var(--text-primary);
   letter-spacing: -0.02em;
+}
+
+.page-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 400;
 }
 
 .header-actions {
@@ -395,5 +401,35 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: flex-end;
   margin-top: 12px;
+}
+
+.ws-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  transition: background-color 0.3s ease;
+}
+
+.status-dot.connected {
+  background-color: #22c55e;
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.4);
+}
+
+.status-dot.disconnected {
+  background-color: #f59e0b;
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
 </style>
