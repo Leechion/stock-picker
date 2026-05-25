@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     port: int = 8000
 
     database_url: str = "sqlite+aiosqlite:///./stock_picker.db"
+    redis_url: str = "redis://localhost:6379/0"
 
     data_refresh_hours: str = "13,15"
     data_refresh_minutes: str = "5,5"
@@ -25,6 +26,12 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
+
+    wechat_corp_id: str = ""
+    wechat_app_agent_id: int = 0
+    wechat_app_secret: str = ""
+    wechat_token: str = ""
+    wechat_encoding_aes_key: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
