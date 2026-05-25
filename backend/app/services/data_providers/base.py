@@ -26,3 +26,13 @@ class DataProvider(ABC):
         Returns DataFrame with columns:
         trade_date, open, close, high, low, volume, amount, change_pct.
         """
+
+    async def async_fetch_stock_list(self) -> pd.DataFrame:
+        """Async version — override in HTTP-based providers for cancellable I/O."""
+        import asyncio
+        return await asyncio.to_thread(self.fetch_stock_list)
+
+    async def async_fetch_daily_data(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """Async version — override in HTTP-based providers for cancellable I/O."""
+        import asyncio
+        return await asyncio.to_thread(self.fetch_daily_data, code, start_date, end_date)

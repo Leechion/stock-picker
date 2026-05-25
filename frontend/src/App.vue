@@ -16,6 +16,10 @@
               <div class="header-titles">
                 <span class="app-title">StockPicker</span>
                 <span class="app-subtitle">A股量化多因子选股</span>
+                <span class="status-dot">
+                  <span class="status-pulse"></span>
+                  <span class="status-text">Live</span>
+                </span>
               </div>
             </div>
             <div class="header-right">
@@ -67,6 +71,9 @@
                 <template #title>系统设置</template>
               </el-menu-item>
             </el-menu>
+            <div class="sidebar-footer" v-if="!isCollapse">
+              <span class="version-tag">v0.1.0</span>
+            </div>
           </el-aside>
 
           <el-main class="app-main">
@@ -149,6 +156,17 @@ watch(darkMode, (val) => {
   align-items: center;
   z-index: 10;
   flex-shrink: 0;
+  position: relative;
+}
+
+.app-header::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(124, 58, 237, 0.2), rgba(99, 102, 241, 0.15), transparent);
 }
 
 .body-wrap {
@@ -177,6 +195,13 @@ watch(darkMode, (val) => {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  box-shadow: 0 2px 10px rgba(124, 58, 237, 0.3);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.logo-icon:hover {
+  transform: scale(1.05);
+  box-shadow: 0 4px 16px rgba(124, 58, 237, 0.4);
 }
 
 .header-titles {
@@ -198,6 +223,36 @@ watch(darkMode, (val) => {
   color: var(--text-muted);
   padding-left: 10px;
   border-left: 1px solid var(--border-subtle);
+}
+
+.status-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border-subtle);
+}
+
+.status-pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.4);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.status-text {
+  font-size: 10px;
+  font-weight: 500;
+  color: #22c55e;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
 
 .header-right {
@@ -271,6 +326,24 @@ watch(darkMode, (val) => {
   background: var(--active-bg) !important;
   color: #7c3aed !important;
   font-weight: 500;
+  box-shadow: inset 3px 0 0 #7c3aed;
+}
+
+.sidebar-footer {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.version-tag {
+  font-size: 10px;
+  color: var(--text-muted);
+  padding: 2px 8px;
+  background: var(--btn-bg);
+  border-radius: 4px;
+  font-family: 'Fira Code', monospace;
 }
 
 /* Main */
@@ -330,8 +403,8 @@ watch(darkMode, (val) => {
   --table-header-text: #94a3b8;
   --scrollbar-thumb: rgba(0, 0, 0, 0.1);
   --scrollbar-thumb-hover: rgba(0, 0, 0, 0.2);
-  --card-shadow: 0 1px 3px rgba(0,0,0,0.06);
-  --card-hover-shadow: 0 4px 16px rgba(0,0,0,0.08);
+  --card-shadow: 0 1px 4px rgba(0,0,0,0.04), 0 2px 8px rgba(0,0,0,0.03);
+  --card-hover-shadow: 0 4px 12px rgba(0,0,0,0.06), 0 1px 4px rgba(0,0,0,0.04);
 }
 
 /* ===== CSS Variables — Dark ===== */
@@ -430,13 +503,19 @@ html.dark .el-card:hover {
   --el-table-border-color: var(--table-border);
   --el-table-text-color: var(--table-text);
   --el-table-header-text-color: var(--table-header-text);
+  --el-table-row-height: 48px;
   font-family: 'Inter', sans-serif;
 }
 
 .el-table th.el-table__cell {
-  font-weight: 500;
+  font-weight: 600;
   font-size: 12px;
   letter-spacing: 0.01em;
+  text-transform: none;
+}
+
+.el-table td.el-table__cell {
+  font-size: 13px;
 }
 
 /* ===== Button ===== */
@@ -471,7 +550,12 @@ html.dark .el-card:hover {
 /* ===== Progress ===== */
 .el-progress-bar__outer {
   background: var(--progress-bg) !important;
-  border-radius: 4px !important;
+  border-radius: 6px !important;
+}
+
+.el-progress-bar__inner {
+  border-radius: 6px !important;
+  transition: width 0.6s ease;
 }
 
 /* ===== Input ===== */
@@ -499,6 +583,17 @@ html.dark .el-card:hover {
   --el-menu-bg-color: transparent !important;
 }
 
+/* ===== Empty State ===== */
+.el-empty__description p {
+  color: var(--text-muted) !important;
+  font-size: 13px;
+}
+
+.el-empty__image svg {
+  fill: var(--text-muted);
+  opacity: 0.3;
+}
+
 /* ===== Descriptions ===== */
 .el-descriptions__body {
   background: transparent !important;
@@ -519,7 +614,14 @@ html.dark .el-card:hover {
   --el-pagination-text-color: var(--text-secondary);
   --el-pagination-button-bg-color: var(--btn-bg);
   --el-pagination-hover-color: #7c3aed;
+  --el-pagination-button-active-bg: rgba(124, 58, 237, 0.15);
   font-family: 'Inter', sans-serif;
+}
+
+.el-pagination .is-active {
+  background: rgba(124, 58, 237, 0.15) !important;
+  color: #a78bfa !important;
+  font-weight: 600;
 }
 
 /* ===== Dialog ===== */
@@ -547,8 +649,8 @@ html.dark .el-card:hover {
 
 /* ===== Scrollbar ===== */
 ::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
@@ -557,11 +659,14 @@ html.dark .el-card:hover {
 
 ::-webkit-scrollbar-thumb {
   background: var(--scrollbar-thumb);
-  border-radius: 4px;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
 }
 
 /* ===== Selection ===== */

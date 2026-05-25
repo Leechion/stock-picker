@@ -33,7 +33,7 @@
         </template>
       </el-table-column>
 
-      <el-table-column label="综合评分" width="130" align="center" sortable :sort-method="(a: RankingItem, b: RankingItem) => (a.score ?? 0) - (b.score ?? 0)">
+      <el-table-column label="综合评分" width="140" align="center" sortable :sort-method="(a: RankingItem, b: RankingItem) => (a.score ?? 0) - (b.score ?? 0)">
         <template #default="{ row }">
           <div class="score-cell">
             <span class="score-value" :style="{ color: getScoreColor(row.score) }">
@@ -42,8 +42,9 @@
             <el-progress
               :percentage="Math.min(100, row.score ?? 0)"
               :color="getScoreColor(row.score)"
-              :stroke-width="4"
+              :stroke-width="5"
               :show-text="false"
+              class="score-progress"
             />
           </div>
         </template>
@@ -136,19 +137,21 @@ function getIndustryTagType(industry: string | null | undefined): '' | 'success'
 .pagination-wrapper {
   display: flex;
   justify-content: center;
-  padding: 14px 0 0;
+  padding: 16px 0 4px;
+  border-top: 1px solid rgba(248, 250, 252, 0.04);
+  margin-top: 12px;
 }
 
 .score-cell {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
 }
 
 .score-value {
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 700;
   font-family: 'Fira Code', monospace;
 }
 
@@ -156,6 +159,9 @@ function getIndustryTagType(industry: string | null | undefined): '' | 'success'
   font-size: 13px;
   font-weight: 600;
   font-family: 'Fira Code', monospace;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(248, 250, 252, 0.04);
 }
 
 .code-text {
@@ -166,13 +172,29 @@ function getIndustryTagType(industry: string | null | undefined): '' | 'success'
 
 .text-dim { color: rgba(248, 250, 252, 0.2); }
 
-:deep(.row-top3) {
-  background-color: rgba(124, 58, 237, 0.04) !important;
+:deep(.row-top3 td) {
+  background-color: rgba(124, 58, 237, 0.06) !important;
+}
+
+:deep(.row-top3 td:first-child) {
+  box-shadow: inset 3px 0 0 #a78bfa;
 }
 
 :deep(.el-table__row) {
   cursor: pointer;
   transition: background 0.15s;
+  animation: rowFadeIn 0.3s ease both;
+}
+
+@keyframes rowFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 :deep(.el-table__row:hover td) {
@@ -183,51 +205,52 @@ function getIndustryTagType(industry: string | null | undefined): '' | 'success'
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
   background: linear-gradient(135deg, #ffd700, #f59e0b);
   color: #fff;
-  font-weight: 600;
-  font-size: 11px;
+  font-weight: 700;
+  font-size: 12px;
+  box-shadow: 0 2px 8px rgba(245, 158, 11, 0.3);
 }
 
 .badge-rank-2 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
-  background: rgba(248, 250, 252, 0.12);
-  color: rgba(248, 250, 252, 0.7);
-  font-weight: 600;
-  font-size: 11px;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: linear-gradient(135deg, rgba(148, 163, 184, 0.25), rgba(148, 163, 184, 0.12));
+  color: rgba(248, 250, 252, 0.8);
+  font-weight: 700;
+  font-size: 12px;
 }
 
 .badge-rank-3 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
-  background: rgba(248, 250, 252, 0.06);
-  color: rgba(248, 250, 252, 0.5);
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: linear-gradient(135deg, rgba(148, 163, 184, 0.15), rgba(148, 163, 184, 0.06));
+  color: rgba(248, 250, 252, 0.6);
   font-weight: 600;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .badge-rank-normal {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
   background: rgba(248, 250, 252, 0.04);
-  color: rgba(248, 250, 252, 0.5);
+  color: rgba(248, 250, 252, 0.4);
   font-weight: 500;
-  font-size: 11px;
+  font-size: 12px;
 }
 </style>

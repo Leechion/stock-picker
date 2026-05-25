@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from loguru import logger
+
 from app.core.config import settings
 from app.core.database import Base, engine
 from app.api import health, stocks, factors, ranking, strategy, sectors, backtest, trading, monitor, wechat
@@ -25,6 +27,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Refresh live prices on startup if there are open positions
     import asyncio as _asyncio
+
     async def _startup_price_refresh():
         await _asyncio.sleep(1)
         try:
@@ -38,19 +41,43 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 result = await session.execute(stmt)
                 codes = list(result.scalars().all())
                 if codes:
-                    loop = _asyncio.get_running_loop()
-                    await loop.run_in_executor(None, refresh_live_prices, codes)
+                    refresh_live_prices(codes)
                     logger.info(f"Startup: cached {len(codes)} live prices to Redis")
         except Exception as e:
             logger.warning(f"Startup price refresh failed: {e}")
+
     _asyncio.create_task(_startup_price_refresh())
 
     try:
         yield
     finally:
+        logger.info("Shutting down...")
+
+        from app.services.data_service import shutdown_event as _shutdown_event
+        _shutdown_event.set()
+
         from app.core.websocket import monitor_hub
         await monitor_hub.stop_broadcast_loop()
         shutdown_scheduler()
+
+        # Dispose DB engine first, while internal tasks are still alive
+        try:
+            await engine.dispose()
+        except Exception:
+            pass
+
+        # Cancel remaining user tasks with a short timeout
+        current = _asyncio.current_task()
+        tasks = [t for t in _asyncio.all_tasks() if t is not current]
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            try:
+                await _asyncio.wait_for(_asyncio.gather(*tasks, return_exceptions=True), timeout=3)
+            except (TimeoutError, _asyncio.CancelledError):
+                pass
+
+        logger.info("Shutdown complete")
 
 
 def create_app() -> FastAPI:

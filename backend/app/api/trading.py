@@ -90,3 +90,75 @@ async def stop_trading(session: AsyncSession = Depends(get_db)):
 async def reset_trading(session: AsyncSession = Depends(get_db)):
     result = await reset_account(session)
     return _ok(result)
+
+
+@router.post("/trading/run-now")
+async def run_trading_now(session: AsyncSession = Depends(get_db)):
+    """Manually trigger pre-market check (buy/sell)."""
+    from app.services.trading_service import pre_market_check
+    actions = await pre_market_check(session)
+    return _ok({"actions": actions, "count": len(actions)})
+
+
+@router.post("/trading/daily-summary")
+async def daily_summary(session: AsyncSession = Depends(get_db)):
+    """Calculate daily P&L with real closing prices and send to WeChat."""
+    import asyncio
+    from app.services.trading_service import refresh_live_prices
+
+    account = await get_or_create_account(session)
+    from app.models.trading import Position
+    from sqlalchemy import select
+    stmt = select(Position).where(Position.account_id == account.id)
+    result = await session.execute(stmt)
+    positions = result.scalars().all()
+
+    if not positions:
+        return _err("无持仓数据")
+
+    # Fetch real closing prices
+    codes = [p.code for p in positions]
+    loop = asyncio.get_running_loop()
+    close_prices = await loop.run_in_executor(None, refresh_live_prices, codes)
+
+    # Calculate P&L
+    lines = [
+        "## 📊 模拟交易日报",
+        "",
+        "| 股票 | 买入价 | 收盘价 | 盈亏 | 盈亏率 |",
+        "|------|--------|--------|------|--------|",
+    ]
+
+    total_pnl = 0
+    for p in positions:
+        close = close_prices.get(p.code)
+        if not close:
+            continue
+        pnl = (close - p.avg_cost) * p.shares
+        pnl_pct = (close - p.avg_cost) / p.avg_cost * 100
+        total_pnl += pnl
+        sign = "+" if pnl >= 0 else ""
+        lines.append(f"| {p.name} | {p.avg_cost:.2f} | {close:.2f} | {sign}{pnl:.0f} | {sign}{pnl_pct:.2f}% |")
+
+    position_value = sum(
+        close_prices.get(p.code, p.avg_cost) * p.shares for p in positions
+    )
+    total_value = account.cash + position_value
+    total_pnl_pct = total_pnl / account.initial_capital * 100
+    arrow = "🔴" if total_pnl < 0 else "🟢"
+
+    lines.extend([
+        "",
+        f"{arrow} **总资产** ¥{total_value:,.2f}",
+        f"- 可用资金 ¥{account.cash:,.2f}",
+        f"- 持仓市值 ¥{position_value:,.2f}",
+        f"- 今日盈亏 ¥{total_pnl:+,.2f} ({total_pnl_pct:+.2f}%)",
+    ])
+
+    msg = "\n".join(lines)
+
+    from app.services.notification_service import send_wechat_work
+    from app.core.config import settings
+    sent = send_wechat_work(settings.wechat_webhook_url, msg)
+
+    return _ok({"sent": sent, "total_pnl": round(total_pnl, 2), "total_pnl_pct": round(total_pnl_pct, 2)})

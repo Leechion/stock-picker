@@ -1,7 +1,10 @@
 <template>
   <div class="sector-view">
     <div class="page-header">
-      <h2 class="page-title">板块排行</h2>
+      <div class="page-title-group">
+        <h2 class="page-title">板块排行</h2>
+        <span class="page-subtitle">行业板块强度分析 · 资金流向追踪</span>
+      </div>
       <el-button type="primary" :icon="Refresh" :loading="loading" @click="loadSectors">
         刷新
       </el-button>
@@ -283,12 +286,24 @@ onMounted(async () => {
   margin-bottom: 20px;
 }
 
+.page-title-group {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
 .page-title {
   margin: 0;
-  font-size: 20px;
-  font-weight: 600;
+  font-size: 22px;
+  font-weight: 700;
   color: var(--text-primary);
   letter-spacing: -0.02em;
+}
+
+.page-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 400;
 }
 
 .summary-cards {

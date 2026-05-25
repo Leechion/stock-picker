@@ -120,7 +120,7 @@ async def compute_ranking(
         async def process_stock(code: str):
             nonlocal total
             async with sem:
-                df = await get_history(session, code, days=250)
+                df = await get_history(session, code, days=80)
                 if df.empty:
                     return
 

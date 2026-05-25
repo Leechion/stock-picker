@@ -113,7 +113,7 @@ async def compute_factors(
 
         count = 0
         for code in codes:
-            df = await get_history(session, code, days=250)
+            df = await get_history(session, code, days=80)
             if not df.empty:
                 await compute_all_factors(session, code, df)
                 count += 1

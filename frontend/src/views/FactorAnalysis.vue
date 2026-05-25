@@ -1,12 +1,16 @@
 <template>
   <div class="factor-view" v-loading="loading">
     <div class="page-header">
-      <h2 class="page-title">因子分析</h2>
+      <div class="page-title-group">
+        <h2 class="page-title">因子分析</h2>
+        <span class="page-subtitle">个股多维度因子拆解 · 雷达图可视化</span>
+      </div>
       <div class="header-actions">
         <el-input
           v-model="selectedCode"
           placeholder="输入股票代码"
-          style="width: 200px"
+          size="default"
+          style="width: 180px"
           @keydown.enter="loadFactors"
         />
         <el-button type="primary" :loading="loading" @click="loadFactors">查询</el-button>
@@ -196,12 +200,24 @@ onBeforeUnmount(() => {
   margin-bottom: 20px;
 }
 
+.page-title-group {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
 .page-title {
   margin: 0;
-  font-size: 20px;
-  font-weight: 600;
-  color: rgba(248, 250, 252, 0.9);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
   letter-spacing: -0.02em;
+}
+
+.page-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 400;
 }
 
 .header-actions {
@@ -221,17 +237,17 @@ onBeforeUnmount(() => {
 
 .chart-panel,
 .info-panel {
-  background: rgba(248, 250, 252, 0.02);
-  border: 1px solid rgba(248, 250, 252, 0.05);
-  border-radius: 10px;
-  padding: 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-card);
+  border-radius: 12px;
+  padding: 20px;
 }
 
 .panel-title {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
-  color: rgba(248, 250, 252, 0.7);
-  margin-bottom: 12px;
+  color: var(--text-primary);
+  margin-bottom: 14px;
 }
 
 .radar-chart { width: 100%; }
@@ -252,13 +268,13 @@ onBeforeUnmount(() => {
 
 .cat-label {
   font-size: 12px;
-  color: rgba(248, 250, 252, 0.45);
+  color: var(--text-muted);
 }
 
 .cat-score {
   font-size: 14px;
   font-weight: 600;
-  color: rgba(248, 250, 252, 0.8);
+  color: var(--text-primary);
 }
 
 .factor-list {
@@ -273,9 +289,14 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 8px;
-  background: rgba(248, 250, 252, 0.02);
-  border-radius: 6px;
+  padding: 10px;
+  background: var(--hover-bg);
+  border-radius: 8px;
+  transition: background 0.15s ease;
+}
+
+.factor-item:hover {
+  background: var(--bg-card-hover);
 }
 
 .factor-row {
@@ -287,12 +308,12 @@ onBeforeUnmount(() => {
 .factor-name {
   font-size: 13px;
   font-weight: 500;
-  color: rgba(248, 250, 252, 0.7);
+  color: var(--text-secondary);
 }
 
 .factor-value {
   font-size: 12px;
-  color: rgba(248, 250, 252, 0.45);
+  color: var(--text-muted);
 }
 
 .table-card { border-radius: 10px; }

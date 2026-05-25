@@ -10,21 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.stock import StockDaily, StockInfo
 from app.services.data_providers import provider_manager
 
-MAIN_BOARD_PREFIXES = ("00", "60")  # 深市主板 + 沪市主板
-MAX_CONCURRENCY = 20  # 最大并发请求数
+MAIN_BOARD_PREFIXES = ("00", "60")
+MAX_CONCURRENCY = 20
 
-EASTMONEY_STOCK_LIST_URL = "https://82.push2.eastmoney.com/api/qt/clist/get"
-EASTMONEY_KLINE_HOSTS = [
-    "push2his.eastmoney.com",
-    "1.push2his.eastmoney.com",
-    "2.push2his.eastmoney.com",
-    "7.push2his.eastmoney.com",
-    "33.push2his.eastmoney.com",
-    "63.push2his.eastmoney.com",
-    "72.push2his.eastmoney.com",
-]
-EASTMONEY_USER_TOKEN = "7eea3edcaed734bea9cbfc24409ed989"
-EASTMONEY_LIST_TOKEN = "bd1d9ddb04089700cf9c27f6f7426281"
+# Set when the server is shutting down — checked in long-running sync loops
+shutdown_event = asyncio.Event()
+
 EASTMONEY_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -34,92 +25,9 @@ EASTMONEY_HEADERS = {
 }
 
 
-def _eastmoney_market_code(code: str) -> int:
-    return 1 if code.startswith(("5", "6", "9")) else 0
-
-
-def _fetch_stock_list_from_eastmoney() -> pd.DataFrame:
-    params = {
-        "pn": "1",
-        "pz": "10000",
-        "po": "1",
-        "np": "1",
-        "ut": EASTMONEY_LIST_TOKEN,
-        "fltt": "2",
-        "invt": "2",
-        "fid": "f12",
-        "fs": "m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23,m:0 t:81 s:2048",
-        "fields": "f12,f14,f100",
-    }
-    response = httpx.get(EASTMONEY_STOCK_LIST_URL, params=params, timeout=20.0, headers=EASTMONEY_HEADERS)
-    response.raise_for_status()
-    payload = response.json()
-    items = payload.get("data", {}).get("diff") or []
-    records = [
-        {"code": item.get("f12"), "name": item.get("f14"), "industry": item.get("f100")}
-        for item in items
-        if item.get("f12") and item.get("f14")
-    ]
-    return pd.DataFrame(records)
-
-
-def _fetch_daily_data_from_eastmoney(code: str, start_date: str, end_date: str) -> pd.DataFrame:
-    params = {
-        "fields1": "f1,f2,f3,f4,f5,f6",
-        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f116",
-        "ut": EASTMONEY_USER_TOKEN,
-        "klt": "101",
-        "fqt": "1",
-        "secid": f"{_eastmoney_market_code(code)}.{code}",
-        "beg": start_date,
-        "end": end_date,
-    }
-    last_error: Exception | None = None
-    for host in EASTMONEY_KLINE_HOSTS:
-        try:
-            response = httpx.get(
-                f"https://{host}/api/qt/stock/kline/get",
-                params=params,
-                timeout=20.0,
-                headers=EASTMONEY_HEADERS,
-            )
-            response.raise_for_status()
-            break
-        except Exception as exc:
-            last_error = exc
-    else:
-        raise RuntimeError(f"all Eastmoney kline hosts failed: {last_error}") from last_error
-
-    payload = response.json()
-    klines = payload.get("data", {}).get("klines") or []
-    if not klines:
-        return pd.DataFrame()
-
-    rows = [line.split(",") for line in klines]
-    df = pd.DataFrame(
-        rows,
-        columns=[
-            "trade_date",
-            "open",
-            "close",
-            "high",
-            "low",
-            "volume",
-            "amount",
-            "amplitude",
-            "change_pct",
-            "change_amount",
-            "turnover",
-        ],
-    )
-    df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce").dt.date
-    for column in ["open", "close", "high", "low", "volume", "amount", "change_pct"]:
-        df[column] = pd.to_numeric(df[column], errors="coerce")
-    return df
-
 async def get_stock_list() -> pd.DataFrame:
-    """Fetch stock list using provider manager (AKShare → Eastmoney fallback)."""
-    return provider_manager.fetch_stock_list()
+    """Fetch stock list using async provider (cancellable HTTP)."""
+    return await provider_manager.async_fetch_stock_list()
 
 
 async def fetch_daily_data(
@@ -127,8 +35,8 @@ async def fetch_daily_data(
     start_date: str,
     end_date: str,
 ) -> pd.DataFrame:
-    """Fetch daily data using provider manager (AKShare → Eastmoney fallback)."""
-    return provider_manager.fetch_daily_data(code, start_date, end_date)
+    """Fetch daily data using async provider (cancellable HTTP)."""
+    return await provider_manager.async_fetch_daily_data(code, start_date, end_date)
 
 
 async def _fetch_one_stock(
@@ -137,7 +45,6 @@ async def _fetch_one_stock(
     industry,
     start_str: str,
     end_str: str,
-    existing_pairs: set,
     semaphore: asyncio.Semaphore,
 ) -> dict | None:
     """Fetch daily data for a single stock with concurrency control.
@@ -182,24 +89,24 @@ async def _fetch_one_stock(
         td = data_row.get("trade_date")
         if td is None:
             continue
-        td_val = td.date() if isinstance(td, pd.Timestamp) else td
-        pair = (code, td_val)
-        if pair in existing_pairs:
-            continue
+
+        def _val(key: str, default=None):
+            v = data_row.get(key)
+            return default if v is None or (isinstance(v, float) and pd.isna(v)) else v
+
         daily_records.append(
             {
                 "code": code,
                 "trade_date": td,
-                "open": data_row.get("open", 0.0),
-                "close": data_row.get("close", 0.0),
-                "high": data_row.get("high", 0.0),
-                "low": data_row.get("low", 0.0),
-                "volume": data_row.get("volume", 0.0),
-                "amount": data_row.get("amount", 0.0),
-                "change_pct": data_row.get("change_pct"),
+                "open": _val("open", 0.0),
+                "close": _val("close", 0.0),
+                "high": _val("high", 0.0),
+                "low": _val("low", 0.0),
+                "volume": _val("volume", 0.0),
+                "amount": _val("amount", 0.0),
+                "change_pct": _val("change_pct", None),
             }
         )
-        existing_pairs.add(pair)
 
     return {
         "code": code,
@@ -209,28 +116,31 @@ async def _fetch_one_stock(
     }
 
 
-async def sync_all_stocks(session: AsyncSession, days_back: int = 365, include_history: bool = True) -> int:
+async def _load_sync_state(session: AsyncSession) -> dict[str, date]:
+    """Load the latest trade_date per stock code from DB."""
+    from sqlalchemy import func
+    stmt = select(StockDaily.code, func.max(StockDaily.trade_date)).group_by(StockDaily.code)
+    result = await session.execute(stmt)
+    return {code: latest for code, latest in result.all()}
+
+
+async def sync_all_stocks(session: AsyncSession, days_back: int = 80, include_history: bool = True) -> int:
     stock_list_df = await get_stock_list()
     if stock_list_df.empty:
         logger.error("Empty stock list, aborting sync")
         return 0
 
-    # Filter: only main board (00xxxx + 60xxxx), drop 30/688/83/43 etc.
     def _is_main_board(code: str) -> bool:
         return code.startswith(MAIN_BOARD_PREFIXES)
 
-    end_date = date.today()
-    start_date = end_date - timedelta(days=days_back)
-    start_str = start_date.strftime("%Y%m%d")
-    end_str = end_date.strftime("%Y%m%d")
+    today = date.today()
+    end_str = today.strftime("%Y%m%d")
 
-    inserted_codes: set[str] = set()
-    existing_stmt = select(StockDaily.code, StockDaily.trade_date)
-    existing_result = await session.execute(existing_stmt)
-    existing_pairs = {(row[0], row[1]) for row in existing_result.all()}
+    latest_dates = await _load_sync_state(session)
+    logger.info(f"Loaded sync state for {len(latest_dates)} stocks from DB")
 
-    # Build candidate list first
     candidates = []
+    skipped = 0
     for _, row in stock_list_df.iterrows():
         code = str(row.get("代码", row.get("code", ""))).strip()
         name = str(row.get("名称", row.get("name", ""))).strip()
@@ -239,9 +149,14 @@ async def sync_all_stocks(session: AsyncSession, days_back: int = 365, include_h
             continue
         if not _is_main_board(code):
             continue
-        candidates.append((code, name, industry))
+        if latest_dates.get(code) == today:
+            skipped += 1
+            continue
+        candidates.append((code, name, industry, latest_dates.get(code)))
 
-    logger.info(f"Filtered to {len(candidates)} main-board stocks (prefixes: {MAIN_BOARD_PREFIXES})")
+    logger.info(f"Filtered to {len(candidates)} stocks to sync ({skipped} already up to date)")
+
+    inserted_codes: set[str] = set()
 
     # Remove non-mainboard stocks from DB
     all_existing_codes = (await session.execute(select(StockInfo.code))).scalars().all()
@@ -253,8 +168,7 @@ async def sync_all_stocks(session: AsyncSession, days_back: int = 365, include_h
         logger.info(f"Removed {len(to_remove)} non-mainboard stocks from DB")
 
     if not include_history:
-        # Fast path: only sync stock info, no daily data
-        for code, name, industry in candidates:
+        for code, name, industry, _ in candidates:
             existing_stock = await session.get(StockInfo, code)
             if existing_stock:
                 existing_stock.name = name
@@ -267,17 +181,36 @@ async def sync_all_stocks(session: AsyncSession, days_back: int = 365, include_h
         logger.info(f"Info-only sync complete: {len(inserted_codes)} stocks")
         return len(inserted_codes)
 
-    # Concurrent fetch daily data
+    # Concurrent fetch daily data (cancellable — all HTTP calls are async)
     semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
-    tasks = [
-        _fetch_one_stock(code, name, industry, start_str, end_str, existing_pairs, semaphore)
-        for code, name, industry in candidates
-    ]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Process results: insert stock info + daily records
+    async def _fetch_with_state(code, name, industry, latest):
+        if shutdown_event.is_set():
+            return None
+        if latest:
+            fetch_start = (latest + timedelta(days=1)).strftime("%Y%m%d")
+        else:
+            fetch_start = (today - timedelta(days=days_back)).strftime("%Y%m%d")
+        if fetch_start > end_str:
+            return None
+        return await _fetch_one_stock(code, name, industry, fetch_start, end_str, semaphore)
+
+    tasks = [_fetch_with_state(code, name, ind, lat) for code, name, ind, lat in candidates]
+    try:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    except asyncio.CancelledError:
+        logger.warning("Stock sync cancelled, cleaning up...")
+        # Cancel all pending tasks
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        raise
+
     synced_records: list[dict] = []
     for i, result in enumerate(results):
+        if shutdown_event.is_set():
+            logger.warning("Shutdown requested, stopping sync early")
+            break
         if isinstance(result, Exception):
             code = candidates[i][0]
             logger.debug(f"Fetch failed for {code}: {result}")
@@ -300,11 +233,21 @@ async def sync_all_stocks(session: AsyncSession, days_back: int = 365, include_h
 
         synced_records.extend(result["daily_records"])
 
-    # Batch insert daily records
     for i in range(0, len(synced_records), 500):
         await session.execute(insert(StockDaily), synced_records[i : i + 500])
 
     await session.commit()
+
+    # Update Redis with synced stock codes for today
+    try:
+        from app.core.redis import get_redis
+        redis = await get_redis()
+        if inserted_codes:
+            await redis.sadd(f"synced:{today}", *inserted_codes)
+            await redis.expire(f"synced:{today}", 86400 * 2)
+    except Exception:
+        pass
+
     logger.info(
         f"Sync complete: {len(inserted_codes)} stocks, {len(synced_records)} daily records, "
         f"concurrency={MAX_CONCURRENCY}"
@@ -342,31 +285,24 @@ async def get_history(
 
 
 # ======================================================================
-# Fundamental data fetching (real financial data from AKShare)
+# Fundamental data fetching
 # ======================================================================
 
-FUNDAMENTAL_CACHE_DAYS = 7  # refresh fundamental data weekly
+FUNDAMENTAL_CACHE_DAYS = 7
 
 EASTMONEY_DATACENTER_URL = "https://datacenter.eastmoney.com/securities/api/data/v1/get"
 
 
-def _fetch_fundamental_sync(code: str) -> dict[str, float | None] | None:
-    """Fetch fundamental data directly from Eastmoney datacenter API.
-
-    Replaces broken AKShare functions with direct HTTP calls.
-    """
+async def _fetch_fundamental_async(code: str, client: httpx.AsyncClient) -> dict[str, float | None] | None:
+    """Fetch fundamental data directly from Eastmoney datacenter API (async)."""
     result: dict[str, float | None] = {
-        "pe_ttm": None,
-        "pb": None,
-        "roe": None,
-        "revenue_growth": None,
-        "profit_growth": None,
-        "debt_ratio": None,
+        "pe_ttm": None, "pb": None, "roe": None,
+        "revenue_growth": None, "profit_growth": None, "debt_ratio": None,
     }
 
     # --- PE / PB ---
     try:
-        resp = httpx.get(
+        resp = await client.get(
             EASTMONEY_DATACENTER_URL,
             params={
                 "reportName": "RPT_VALUEANALYSIS_DET",
@@ -376,8 +312,6 @@ def _fetch_fundamental_sync(code: str) -> dict[str, float | None] | None:
                 "source": "WEB",
                 "client": "WEB",
             },
-            timeout=10.0,
-            headers=EASTMONEY_HEADERS,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -390,7 +324,7 @@ def _fetch_fundamental_sync(code: str) -> dict[str, float | None] | None:
 
     # --- ROE / growth / debt ---
     try:
-        resp = httpx.get(
+        resp = await client.get(
             EASTMONEY_DATACENTER_URL,
             params={
                 "reportName": "RPT_F10_FINANCE_MAINFINADATA",
@@ -402,8 +336,6 @@ def _fetch_fundamental_sync(code: str) -> dict[str, float | None] | None:
                 "source": "WEB",
                 "client": "WEB",
             },
-            timeout=10.0,
-            headers=EASTMONEY_HEADERS,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -419,41 +351,14 @@ def _fetch_fundamental_sync(code: str) -> dict[str, float | None] | None:
     return result
 
 
-async def _fetch_one_fundamental(
-    code: str,
-    executor,
-    progress: dict,
-) -> tuple[str, dict[str, float | None] | None]:
-    """Fetch fundamental data for one stock using a shared thread pool."""
-    loop = asyncio.get_running_loop()
-    try:
-        data = await loop.run_in_executor(executor, lambda: _fetch_fundamental_sync(code))
-        progress["done"] += 1
-        if progress["done"] % 50 == 0:
-            logger.info(f"Fundamental sync progress: {progress['done']}/{progress['total']}")
-        if data is None or all(v is None for v in data.values()):
-            return code, None
-        return code, data
-    except Exception as exc:
-        progress["done"] += 1
-        logger.debug(f"Fundamental fetch failed for {code}: {exc}")
-        return code, None
-
-    return result
-
-
 async def sync_fundamentals(session: AsyncSession, code_prefix: str = "") -> int:
     """Fetch and cache fundamental data for all main-board stocks.
 
-    Uses a ThreadPoolExecutor for true parallel HTTP requests.
-    Only refreshes stocks whose cached data is older than FUNDAMENTAL_CACHE_DAYS.
-    Returns the number of stocks synced.
+    Uses async HTTP via httpx.AsyncClient for cancellable I/O.
     """
-    from concurrent.futures import ThreadPoolExecutor
     from datetime import datetime, timedelta
     from app.models.stock import StockFundamental
 
-    # Build query — filter by prefix if given, otherwise all main board stocks
     if code_prefix:
         stmt = select(StockInfo.code).where(StockInfo.code.startswith(code_prefix))
     else:
@@ -463,7 +368,6 @@ async def sync_fundamentals(session: AsyncSession, code_prefix: str = "") -> int
     result = await session.execute(stmt)
     all_codes = list(result.scalars().all())
 
-    # Pre-load existing cached records
     cutoff = datetime.now() - timedelta(days=FUNDAMENTAL_CACHE_DAYS)
     existing_stmt = select(StockFundamental)
     existing_result = await session.execute(existing_stmt)
@@ -471,7 +375,6 @@ async def sync_fundamentals(session: AsyncSession, code_prefix: str = "") -> int
     for row in existing_result.scalars().all():
         existing_map[row.code] = row
 
-    # Filter out recently cached stocks
     codes_to_fetch = []
     for code in all_codes:
         existing = existing_map.get(code)
@@ -485,16 +388,38 @@ async def sync_fundamentals(session: AsyncSession, code_prefix: str = "") -> int
     if not codes_to_fetch:
         return 0
 
-    # Concurrent fetch with explicit thread pool
-    progress = {"done": 0, "total": len(codes_to_fetch)}
-    executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENCY)
-    try:
-        tasks = [_fetch_one_fundamental(code, executor, progress) for code in codes_to_fetch]
-        results = await asyncio.gather(*tasks)
-    finally:
-        executor.shutdown(wait=False)
+    sem = asyncio.Semaphore(MAX_CONCURRENCY)
+    done = 0
+    total = len(codes_to_fetch)
 
-    # Persist results
+    async def _fetch_one(code: str, client: httpx.AsyncClient) -> tuple[str, dict[str, float | None] | None]:
+        nonlocal done
+        if shutdown_event.is_set():
+            return code, None
+        async with sem:
+            try:
+                data = await _fetch_fundamental_async(code, client)
+            except Exception as exc:
+                logger.debug(f"Fundamental fetch failed for {code}: {exc}")
+                return code, None
+        done += 1
+        if done % 50 == 0:
+            logger.info(f"Fundamental sync progress: {done}/{total}")
+        if data is None or all(v is None for v in data.values()):
+            return code, None
+        return code, data
+
+    async with httpx.AsyncClient(timeout=10.0, headers=EASTMONEY_HEADERS) as client:
+        tasks = [_fetch_one(code, client) for code in codes_to_fetch]
+        try:
+            results = await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            logger.warning("Fundamental sync cancelled, cleaning up...")
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            raise
+
     synced = 0
     now = datetime.now()
     for code, data in results:
@@ -516,23 +441,6 @@ async def sync_fundamentals(session: AsyncSession, code_prefix: str = "") -> int
     return synced
 
 
-def _find_column(df: "pd.DataFrame", candidates: list[str]) -> str | None:
-    """Return the first column name in *df* that matches one of *candidates*."""
-    for col in df.columns:
-        if col in candidates or any(c in str(col) for c in candidates):
-            return col
-    return None
-
-
-def _lookup(series, candidates: list[str]) -> float | None:
-    """Return the first value whose index contains any of *candidates*."""
-    for idx in series.index:
-        for c in candidates:
-            if c in str(idx):
-                return series[idx]
-    return None
-
-
 def _safe_float(val) -> float | None:
     """Convert to float, returning None on failure or NaN."""
     try:
@@ -543,14 +451,10 @@ def _safe_float(val) -> float | None:
 
 
 async def sync_industry(session: AsyncSession) -> int:
-    """Fetch industry/sector info from Eastmoney datacenter API and update StockInfo records.
-
-    Returns the number of stocks updated.
-    """
-    # Fetch all latest industry data from Eastmoney datacenter (paginated)
+    """Fetch industry/sector info from Eastmoney datacenter API and update StockInfo records."""
     industry_map: dict[str, str] = {}
     page = 1
-    page_size = 500  # API max per page
+    page_size = 500
 
     while True:
         try:
@@ -593,7 +497,6 @@ async def sync_industry(session: AsyncSession) -> int:
 
     logger.info(f"Fetched industry for {len(industry_map)} stocks from Eastmoney")
 
-    # Update StockInfo
     all_stocks = (await session.execute(select(StockInfo))).scalars().all()
     updated = 0
     for stock in all_stocks:
@@ -604,7 +507,6 @@ async def sync_industry(session: AsyncSession) -> int:
 
     await session.commit()
 
-    # Also update industry in latest rankings
     from app.models.stock import StockRanking
     from sqlalchemy import update as sql_update
 

@@ -1,10 +1,13 @@
 <template>
   <div class="stock-list-view">
     <div class="page-header">
-      <h2 class="page-title">
-        全部股票
-        <span class="count-badge">{{ filteredStocks.length }}</span>
-      </h2>
+      <div class="page-title-group">
+        <h2 class="page-title">
+          全部股票
+          <span class="count-badge">{{ filteredStocks.length }}</span>
+        </h2>
+        <span class="page-subtitle">全市场股票数据浏览 · 多维筛选</span>
+      </div>
     </div>
 
     <div class="filter-bar">
@@ -165,15 +168,27 @@ onMounted(() => { loadStocks() })
   margin-bottom: 16px;
 }
 
+.page-title-group {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
 .page-title {
   display: flex;
   align-items: center;
   gap: 8px;
   margin: 0;
-  font-size: 20px;
-  font-weight: 600;
-  color: rgba(248, 250, 252, 0.9);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
   letter-spacing: -0.02em;
+}
+
+.page-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 400;
 }
 
 .count-badge {

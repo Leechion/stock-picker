@@ -23,6 +23,22 @@ HEADERS = {
     "Referer": "https://quote.eastmoney.com/",
 }
 
+# Quick probe to skip Eastmoney when unreachable
+_eastmoney_reachable: bool | None = None
+
+
+def _check_eastmoney() -> bool:
+    global _eastmoney_reachable
+    if _eastmoney_reachable is not None:
+        return _eastmoney_reachable
+    try:
+        httpx.get(MONEYFLOW_URL, params={"secid": "1.600519", "fields": "f62", "ut": "test", "invt": "2", "fltt": "2"}, timeout=3.0, headers=HEADERS)
+        _eastmoney_reachable = True
+    except Exception:
+        _eastmoney_reachable = False
+        logger.warning("[capital_flow] Eastmoney unreachable, skipping flow/chip data")
+    return _eastmoney_reachable
+
 
 def _market_code(code: str) -> int:
     return 1 if code.startswith(("5", "6", "9")) else 0
@@ -37,16 +53,7 @@ def _safe_float(val) -> float | None:
 
 
 def fetch_money_flow(code: str) -> dict[str, float | None]:
-    """Fetch money flow data from Eastmoney.
-
-    Returns dict with:
-    - main_net_inflow: 主力净流入 (万元)
-    - super_large_net: 超大单净流入 (万元)
-    - large_net: 大单净流入 (万元)
-    - medium_net: 中单净流入 (万元)
-    - small_net: 小单净流入 (万元)
-    - main_net_ratio: 主力净流入占比 (%)
-    """
+    """Fetch money flow data from Eastmoney."""
     result: dict[str, float | None] = {
         "main_net_inflow": None,
         "super_large_net": None,
@@ -55,6 +62,8 @@ def fetch_money_flow(code: str) -> dict[str, float | None]:
         "small_net": None,
         "main_net_ratio": None,
     }
+    if not _check_eastmoney():
+        return result
 
     try:
         secid = f"{_market_code(code)}.{code}"
@@ -91,18 +100,14 @@ def fetch_money_flow(code: str) -> dict[str, float | None]:
 
 
 def fetch_chip_distribution(code: str) -> dict[str, float | None]:
-    """Fetch chip concentration data from Eastmoney.
-
-    Returns dict with:
-    - chip_concentration: 筹码集中度 (90%成本集中度)
-    - profit_ratio: 获利比例 (%)
-    - avg_cost: 平均成本 (元)
-    """
+    """Fetch chip concentration data from Eastmoney."""
     result: dict[str, float | None] = {
         "chip_concentration": None,
         "profit_ratio": None,
         "avg_cost": None,
     }
+    if not _check_eastmoney():
+        return result
 
     try:
         resp = httpx.get(
