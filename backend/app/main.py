@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.database import Base, engine
-from app.api import health, stocks, factors, ranking, strategy, sectors, backtest, trading, monitor
+from app.api import health, stocks, factors, ranking, strategy, sectors, backtest, trading, monitor, wechat
 
 
 @asynccontextmanager
@@ -80,6 +80,7 @@ def create_app() -> FastAPI:
     app.include_router(backtest.router, prefix="/api")
     app.include_router(trading.router, prefix="/api")
     app.include_router(monitor.router, prefix="/api")
+    app.include_router(wechat.router, prefix="/api")
 
     return app
 
