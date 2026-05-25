@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import date, datetime
 
 from loguru import logger
@@ -11,6 +12,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.stock import StockDaily, StockInfo, StockRanking
 from app.models.trading import Position, TradeLog, TradingAccount
 from app.services.strategy_loader import strategy_loader
+
+
+def _broadcast_trade_event(action: str, code: str, name: str, price: float, shares: int, pnl: float | None = None, reason: str = "") -> None:
+    """Fire-and-forget broadcast of a trade event to WebSocket clients."""
+    import asyncio
+    from app.core.websocket import monitor_hub
+
+    data = {
+        "action": action,
+        "code": code,
+        "name": name,
+        "price": price,
+        "shares": shares,
+        "pnl": round(pnl, 2) if pnl is not None else None,
+        "reason": reason,
+        "timestamp": datetime.now().isoformat(),
+    }
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(monitor_hub.broadcast("trades", data))
+    except RuntimeError:
+        pass
 
 
 # ======================================================================
@@ -167,6 +190,7 @@ async def execute_buy(
     session.add(log)
 
     logger.info(f"BUY {name}({code}) {shares}股 @ {price:.2f} 止损={stop_loss:.2f}")
+    _broadcast_trade_event("buy", code, name, price, shares, reason=log.reason)
     return log
 
 
@@ -207,6 +231,7 @@ async def execute_sell(
     session.add(log)
 
     logger.info(f"SELL {position.name}({position.code}) {sell_shares}股 @ {price:.2f} 盈亏={pnl:.2f} 原因={reason}")
+    _broadcast_trade_event(action, position.code, position.name, price, sell_shares, pnl=pnl, reason=reason)
     return log
 
 
@@ -414,10 +439,19 @@ async def get_positions_with_prices(session: AsyncSession, account_id: int) -> l
     result = await session.execute(stmt)
     positions = result.scalars().all()
 
+    if not positions:
+        return []
+
+    # Read from Redis cache
+    from app.core.redis import get_redis
+    redis = await get_redis()
+    codes = [pos.code for pos in positions]
+    cached = await redis.mget([f"price:{c}" for c in codes])
+    price_map = {codes[i]: float(cached[i]) for i in range(len(codes)) if cached[i]}
+
     records = []
     for pos in positions:
-        price = await get_latest_price(session, pos.code)
-        current_price = price or pos.avg_cost
+        current_price = price_map.get(pos.code) or await get_latest_price(session, pos.code) or pos.avg_cost
         pnl = (current_price - pos.avg_cost) * pos.shares
         pnl_pct = (current_price / pos.avg_cost - 1) * 100 if pos.avg_cost > 0 else 0
 
@@ -436,6 +470,46 @@ async def get_positions_with_prices(session: AsyncSession, account_id: int) -> l
         })
 
     return records
+
+
+def refresh_live_prices(codes: list[str]) -> dict[str, float]:
+    """Fetch live prices from Tencent and store in Redis. Call from background thread."""
+    import requests as req
+    import redis as sync_redis
+    from app.core.config import settings
+
+    prefixed = []
+    for code in codes:
+        prefix = "sh" if code.startswith(("5", "6", "9")) else "sz"
+        prefixed.append(f"{prefix}{code}")
+
+    prices = {}
+    try:
+        url = f"http://qt.gtimg.cn/q={','.join(prefixed)}"
+        r = req.get(url, timeout=5)
+        text = r.content.decode("gbk", errors="replace")
+        for line in text.strip().split(";"):
+            line = line.strip()
+            if not line or "=" not in line:
+                continue
+            fields = line.split("~")
+            if len(fields) > 3:
+                code = fields[2]
+                close = float(fields[3]) if fields[3] else 0
+                if code and close > 0:
+                    prices[code] = close
+
+        # Write to Redis with 60s TTL
+        rds = sync_redis.from_url(settings.redis_url, decode_responses=True)
+        pipe = rds.pipeline()
+        for code, price in prices.items():
+            pipe.set(f"price:{code}", price, ex=60)
+        pipe.execute()
+        rds.close()
+    except Exception:
+        pass
+
+    return prices
 
 
 # ======================================================================
@@ -498,9 +572,20 @@ async def pre_market_check(session: AsyncSession) -> list[dict]:
     today = date.today()
     strategy = strategy_loader.active_name
 
-    # Get today's rankings
+    # Get today's rankings, fallback to most recent available date
     from app.services.ranking_service import get_ranking_list
     records, _ = await get_ranking_list(session, today, page=1, page_size=20, strategy=strategy)
+
+    if not records:
+        # Fallback: use most recent ranking date
+        latest_date_stmt = (
+            select(func.max(StockRanking.rank_date))
+            .where(StockRanking.strategy == strategy)
+        )
+        latest_date = (await session.execute(latest_date_stmt)).scalar_one_or_none()
+        if latest_date:
+            logger.info(f"No rankings for {today}, falling back to {latest_date}")
+            records, _ = await get_ranking_list(session, latest_date, page=1, page_size=20, strategy=strategy)
 
     if not records:
         logger.warning("No rankings available for trading")
@@ -530,9 +615,12 @@ async def pre_market_check(session: AsyncSession) -> list[dict]:
         if price:
             await check_and_execute_pyramid_add(session, account, pos, price)
 
-    # Buy new positions: top 10 not yet held
+    # Buy new positions: top 10 not yet held, skip ST stocks
     for r in records[:10]:
         if r["code"] in existing:
+            continue
+        name = r.get("name", "")
+        if "ST" in name.upper():
             continue
         if len(existing) + sum(1 for a in actions if a.get("action") == "buy") >= 10:
             break
@@ -545,7 +633,6 @@ async def pre_market_check(session: AsyncSession) -> list[dict]:
         if not atr:
             continue
 
-        name = r.get("name", "")
         if not name:
             name_stmt = select(StockInfo.name).where(StockInfo.code == r["code"])
             name_result = await session.execute(name_stmt)
