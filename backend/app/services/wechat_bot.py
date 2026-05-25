@@ -6,6 +6,7 @@ import base64
 import hashlib
 import struct
 import xml.etree.ElementTree as ET
+import asyncio
 from datetime import date
 
 from loguru import logger
@@ -100,6 +101,7 @@ async def _get_stock_scores(code: str) -> dict | None:
     from sqlalchemy import func, select
     from app.core.database import AsyncSessionLocal
     from app.models.stock import StockRanking
+    from app.services.strategy_loader import strategy_loader
 
     async with AsyncSessionLocal() as session:
         latest_date_stmt = select(func.max(StockRanking.rank_date))
@@ -110,7 +112,7 @@ async def _get_stock_scores(code: str) -> dict | None:
         stmt = select(StockRanking).where(
             StockRanking.code == code,
             StockRanking.rank_date == latest_date,
-            StockRanking.strategy == "default",
+            StockRanking.strategy == strategy_loader.active_name,
         )
         result = await session.execute(stmt)
         ranking = result.scalar_one_or_none()
@@ -126,6 +128,148 @@ async def _get_stock_scores(code: str) -> dict | None:
             "industry": ranking.industry or "",
             "rank_date": str(latest_date),
         }
+
+
+async def _get_latest_ranking_date() -> date | None:
+    """Get the latest date that has ranking data."""
+    from sqlalchemy import func, select
+    from app.core.database import AsyncSessionLocal
+    from app.models.stock import StockRanking
+
+    async with AsyncSessionLocal() as session:
+        stmt = select(func.max(StockRanking.rank_date))
+        return (await session.execute(stmt)).scalar_one_or_none()
+
+
+def _generate_batch_analysis(records: list[dict]) -> str:
+    """Generate AI batch analysis for top stocks (synchronous)."""
+    from app.services.ai_report_service import generate_report
+
+    try:
+        return generate_report(records)
+    except Exception as exc:
+        logger.error(f"Batch AI analysis failed: {exc}")
+        return ""
+
+
+async def _cmd_recommend() -> str:
+    """推荐: Top 10 rankings + AI analysis."""
+    ranking_date = await _get_latest_ranking_date()
+    if not ranking_date:
+        return "暂无排名数据，请稍后再试"
+
+    from app.core.database import AsyncSessionLocal
+    from app.services.ranking_service import get_ranking_list
+
+    async with AsyncSessionLocal() as session:
+        records, _ = await get_ranking_list(session, ranking_date, page=1, page_size=10)
+
+    if not records:
+        return f"暂无排名数据 ({ranking_date})，请稍后再试"
+
+    lines = [f"🏆 **今日 Top 10 推荐** ({ranking_date})\n"]
+    for i, r in enumerate(records, 1):
+        lines.append(f"{i}. **{r['name']}** ({r['code']}) — 综合 {r['score']}")
+
+    # AI batch analysis (run in thread pool since it's sync)
+    loop = asyncio.get_running_loop()
+    ai_text = await loop.run_in_executor(None, _generate_batch_analysis, records)
+    if ai_text:
+        lines.append("---")
+        lines.append(f"🤖 **AI 综合点评**\n{ai_text}")
+
+    return "\n".join(lines)
+
+
+async def _cmd_sector_heat() -> str:
+    """板块: Sector heat rankings."""
+    from app.services import sector_service
+
+    loop = asyncio.get_running_loop()
+    sectors = await loop.run_in_executor(None, sector_service.fetch_sector_performance)
+    if not sectors:
+        return "无法获取板块数据，请稍后再试"
+
+    heat = await loop.run_in_executor(None, sector_service.compute_sector_heat, sectors)
+    # Sort by heat score descending, top 5
+    sorted_sectors = sorted(heat.items(), key=lambda x: x[1], reverse=True)[:5]
+
+    # Also get real-time change pct for context
+    perf_map = {s["name"]: s for s in sectors}
+
+    lines = ["🔥 **板块热度 Top 5**\n"]
+    for i, (name, score) in enumerate(sorted_sectors, 1):
+        pct = perf_map.get(name, {}).get("change_pct", 0)
+        arrow = "🔴" if pct >= 0 else "🟢"
+        lines.append(f"{i}. **{name}** — 热度 {score:.1f}  {arrow} {pct:+.2f}%")
+
+    lines.append("\n发送行业名称查看该行业排名前5的股票")
+    return "\n".join(lines)
+
+
+async def _cmd_strategy_switch(name: str) -> str:
+    """动量/价值/均衡: Switch active strategy."""
+    from app.services.strategy_loader import strategy_loader
+
+    # Map Chinese names to slugs
+    slug_map = {"均衡": "default", "动量": "momentum", "价值": "value"}
+    slug = slug_map.get(name, name)
+
+    if strategy_loader.set_active(slug):
+        config = strategy_loader.get_active_config()
+        display_name = config.get("name", slug)
+        return f"✅ 策略已切换为：**{display_name}**"
+    else:
+        available = ", ".join(s["slug"] for s in strategy_loader.list_strategies())
+        return f"❌ 未找到策略「{name}」\n可用策略: {available}"
+
+
+async def _cmd_strategy_view() -> str:
+    """策略: View current strategy and available strategies."""
+    from app.services.strategy_loader import strategy_loader
+
+    strategies = strategy_loader.list_strategies()
+    active = strategy_loader.active_name
+
+    lines = ["⚙️ **当前策略配置**\n"]
+    for s in strategies:
+        marker = "👉" if s["slug"] == active else "  "
+        lines.append(f"{marker} **{s['name']}** — {s['description']}")
+
+    lines.append("\n发送「均衡/动量/价值」切换策略")
+    return "\n".join(lines)
+
+
+async def _cmd_industry_query(industry: str) -> str:
+    """<行业名>: Industry top 5 stocks."""
+    ranking_date = await _get_latest_ranking_date()
+    if not ranking_date:
+        return "暂无排名数据，请稍后再试"
+
+    from app.core.database import AsyncSessionLocal
+    from app.services.ranking_service import get_sector_stocks
+
+    async with AsyncSessionLocal() as session:
+        records, total = await get_sector_stocks(session, industry, ranking_date, page=1, page_size=5)
+
+    if not records:
+        # Try fuzzy match via sector rankings
+        from app.services.ranking_service import get_sector_rankings
+        async with AsyncSessionLocal() as session:
+            sectors = await get_sector_rankings(session, ranking_date)
+        matched = [s for s in sectors if industry in s["industry"]]
+        if matched:
+            return f"未找到行业「{industry}」，你是不是想找：{', '.join(s['industry'] for s in matched[:3])}"
+        return f"未找到行业「{industry}」的相关数据"
+
+    lines = [f"📊 **{industry}** 行业 Top 5 ({ranking_date})\n"]
+    for i, r in enumerate(records, 1):
+        lines.append(f"{i}. **{r['name']}** ({r['code']}) — 综合 {r['score']}")
+
+    if total > 5:
+        lines.append(f"\n共 {total} 只股票，发送「{industry} 更多」查看完整排名")
+
+    return "\n".join(lines)
 
 
 async def _find_stock_by_name(name: str) -> str | None:
@@ -185,21 +329,45 @@ async def handle_command(content: str) -> str:
 
     Supported:
       帮助 → help text
+      推荐 → Top 10 rankings + AI analysis
+      板块 → sector heat rankings
+      动量/价值/均衡 → switch strategy
+      策略 → view current strategy
       000001 → quote + scores
       000001 分析 → AI analysis
       平安银行 → fuzzy match name → quote + scores
+      <行业名> → industry top 5 stocks
     """
     text = content.strip()
 
     if text in ("帮助", "help", "使用说明"):
         return (
             "📋 **StockPicker Bot 使用说明**\n\n"
-            "发送以下指令：\n"
+            "📊 **选股推荐**\n"
+            "- `推荐` — 今日 Top 10 推荐 + AI 点评\n"
+            "- `板块` — 板块热度排名 Top 5\n"
+            "- `均衡/动量/价值` — 切换选股策略\n"
+            "- `策略` — 查看当前策略\n"
+            "\n📈 **个股查询**\n"
             "- `000001` — 查看行情 + 因子评分\n"
             "- `000001 分析` — 获取 AI 深度分析\n"
             "- `平安银行` — 按股票名称查询\n"
-            "- `帮助` — 显示本帮助"
+            "\n🏭 **行业查询**\n"
+            "- 发送行业名（如「半导体」）— 行业排名前5"
         )
+
+    # New commands
+    if text == "推荐":
+        return await _cmd_recommend()
+
+    if text == "板块":
+        return await _cmd_sector_heat()
+
+    if text in ("动量", "价值", "均衡"):
+        return await _cmd_strategy_switch(text)
+
+    if text == "策略":
+        return await _cmd_strategy_view()
 
     # Check for "分析" suffix
     want_analysis = text.endswith("分析")
@@ -215,7 +383,8 @@ async def handle_command(content: str) -> str:
         code = await _find_stock_by_name(text)
 
     if not code:
-        return f"未找到股票: {text}\n发送 \"帮助\" 查看使用说明"
+        # Try as industry name
+        return await _cmd_industry_query(text)
 
     # Fetch quote
     quote = await _get_realtime_quote(code)

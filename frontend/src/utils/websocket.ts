@@ -17,18 +17,21 @@ class MonitorWebSocket {
 
   constructor() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = window.location.host
-    this.url = `${protocol}//${host}/api/ws/monitor`
+    // Connect directly to backend, bypass Vite proxy for WebSocket
+    const host = window.location.hostname
+    this.url = `${protocol}//${host}:8000/api/ws/monitor`
   }
 
   connect() {
     if (this.ws?.readyState === WebSocket.OPEN) return
     this.state = 'connecting'
+    console.log('[WS] connecting to', this.url)
     this.ws = new WebSocket(this.url)
 
     this.ws.onopen = () => {
       this.state = 'connected'
       this.reconnectAttempts = 0
+      console.log('[WS] connected')
       if (this.channels.size > 0) {
         this._send({ action: 'subscribe', channels: [...this.channels] })
       }
@@ -57,7 +60,8 @@ class MonitorWebSocket {
       this._scheduleReconnect()
     }
 
-    this.ws.onerror = () => {
+    this.ws.onerror = (e) => {
+      console.error('[WS] error:', e)
       this.ws?.close()
     }
   }

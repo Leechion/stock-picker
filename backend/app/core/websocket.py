@@ -154,6 +154,8 @@ class MonitorHub:
             return
         async with AsyncSessionLocal() as session:
             account = await get_or_create_account(session)
+            if not account.is_active:
+                return
             positions = await get_positions_with_prices(session, account.id)
             value_info = await update_account_value(session, account)
             await session.commit()

@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import threading
+
 import pandas as pd
 from loguru import logger
 
 from app.services.data_providers.base import DataProvider
+
+# AKShare uses mini_racer (V8) internally which is not thread-safe.
+# Serialize all AKShare calls with a global lock.
+_akshare_lock = threading.Lock()
 
 
 class AKShareProvider(DataProvider):
@@ -17,22 +23,24 @@ class AKShareProvider(DataProvider):
     def fetch_stock_list(self) -> pd.DataFrame:
         import akshare as ak
 
-        if hasattr(ak, "stock_info_a_code_name_df"):
-            result = ak.stock_info_a_code_name_df()
-        else:
-            result = ak.stock_info_a_code_name()
+        with _akshare_lock:
+            if hasattr(ak, "stock_info_a_code_name_df"):
+                result = ak.stock_info_a_code_name_df()
+            else:
+                result = ak.stock_info_a_code_name()
         logger.info(f"[{self.name}] Fetched {len(result)} stock codes")
         return result
 
     def fetch_daily_data(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
         import akshare as ak
 
-        df = ak.stock_zh_a_daily(
-            symbol=self._market_symbol(code),
-            start_date=start_date,
-            end_date=end_date,
-            adjust="qfq",
-        )
+        with _akshare_lock:
+            df = ak.stock_zh_a_daily(
+                symbol=self._market_symbol(code),
+                start_date=start_date,
+                end_date=end_date,
+                adjust="qfq",
+            )
         if df is not None and not df.empty:
             # Normalize column names
             col_map = {

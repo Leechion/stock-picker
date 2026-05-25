@@ -179,6 +179,8 @@
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  getTradingAccount,
+  getTradingPositions,
   getTradingLogs,
   startTradingBot,
   stopTradingBot,
@@ -248,6 +250,8 @@ async function handleStart() {
   try {
     await startTradingBot()
     ElMessage.success('交易机器人已启动')
+    await loadInitialData()
+    loadLogs()
   } catch { ElMessage.error('启动失败') }
   finally { actionLoading.value = false }
 }
@@ -257,6 +261,8 @@ async function handleStop() {
   try {
     await stopTradingBot()
     ElMessage.success('交易机器人已停止')
+    await loadInitialData()
+    loadLogs()
   } catch { ElMessage.error('停止失败') }
   finally { actionLoading.value = false }
 }
@@ -274,9 +280,29 @@ async function handleReset() {
   try {
     await resetTradingAccount()
     ElMessage.success('账户已重置')
+    await loadInitialData()
     loadLogs()
   } catch { ElMessage.error('重置失败') }
   finally { actionLoading.value = false }
+}
+
+async function loadInitialData() {
+  try {
+    const [accountRes, positionsRes] = await Promise.all([
+      getTradingAccount(),
+      getTradingPositions(),
+    ])
+    console.log('[TradingView] accountRes:', accountRes)
+    console.log('[TradingView] positionsRes:', positionsRes)
+    const accountData = accountRes.data ?? accountRes
+    const positionsData = positionsRes.data ?? positionsRes
+    console.log('[TradingView] accountData:', accountData)
+    console.log('[TradingView] positionsData type:', typeof positionsData, 'length:', Array.isArray(positionsData) ? positionsData.length : 'N/A')
+    monitor.updateAccount(accountData)
+    monitor.updatePositions(Array.isArray(positionsData) ? positionsData : [])
+  } catch (e) {
+    console.error('[TradingView] loadInitialData failed:', e)
+  }
 }
 
 onMounted(() => {
@@ -288,6 +314,7 @@ onMounted(() => {
   monitorWs.connect()
   monitorWs.subscribe(['positions', 'account', 'trades'])
 
+  loadInitialData()
   loadLogs()
 })
 

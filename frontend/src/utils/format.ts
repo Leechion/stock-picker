@@ -86,8 +86,9 @@ export function getRankBadgeClass(rank: number): string {
 }
 
 export function getScoreColor(score: number): string {
-  if (score >= 80) return '#67c23a'
-  if (score >= 60) return '#409eff'
-  if (score >= 40) return '#e6a23c'
-  return '#f56c6c'
+  if (score >= 80) return '#22c55e'
+  if (score >= 65) return '#a78bfa'
+  if (score >= 50) return '#60a5fa'
+  if (score >= 35) return '#fbbf24'
+  return '#f87171'
 }

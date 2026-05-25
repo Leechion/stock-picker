@@ -39,7 +39,7 @@ def fetch_sector_performance() -> list[dict]:
                 "invt": "2",
                 "fid": "f3",
                 "fs": "m:90+t:2+f:!50",
-                "fields": "f2,f3,f4,f62,f104,f105,f128,f140",
+                "fields": "f2,f3,f4,f12,f14,f62,f104,f105",
             },
             timeout=10.0,
             headers=HEADERS,
@@ -51,7 +51,7 @@ def fetch_sector_performance() -> list[dict]:
         sectors = []
         for item in items:
             sectors.append({
-                "name": item.get("f140", ""),
+                "name": item.get("f14", ""),
                 "change_pct": item.get("f3"),
                 "net_inflow": item.get("f62"),
                 "limit_up_count": item.get("f104", 0),

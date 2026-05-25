@@ -707,7 +707,7 @@ async def compute_factors_for_all_stocks(session: AsyncSession) -> int:
         if (i + 1) % 50 == 0:
             await session.commit()
             logger.info(f"Factor computation progress: {i + 1}/{len(codes)} stocks")
-        df = await get_history(session, code, days=250)
+        df = await get_history(session, code, days=80)
         if not df.empty:
             await compute_all_factors(session, code, df)
             total += 1

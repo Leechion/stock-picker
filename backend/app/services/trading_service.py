@@ -411,9 +411,26 @@ async def update_account_value(session: AsyncSession, account: TradingAccount) -
     result = await session.execute(stmt)
     positions = result.scalars().all()
 
+    if not positions:
+        account.total_value = round(account.cash, 2)
+        account.updated_at = datetime.now()
+        return {
+            "total_value": account.total_value,
+            "cash": round(account.cash, 2),
+            "position_value": 0.0,
+            "pnl": round(account.total_value - account.initial_capital, 2),
+            "pnl_pct": round((account.total_value / account.initial_capital - 1) * 100, 2),
+        }
+
+    # Fetch live prices for accurate valuation
+    codes = [pos.code for pos in positions]
+    import asyncio as _asyncio
+    loop = _asyncio.get_running_loop()
+    live_prices = await loop.run_in_executor(None, refresh_live_prices, codes)
+
     position_value = 0.0
     for pos in positions:
-        price = await get_latest_price(session, pos.code)
+        price = live_prices.get(pos.code) or await get_latest_price(session, pos.code)
         if price:
             position_value += price * pos.shares
 
@@ -442,12 +459,25 @@ async def get_positions_with_prices(session: AsyncSession, account_id: int) -> l
     if not positions:
         return []
 
-    # Read from Redis cache
-    from app.core.redis import get_redis
-    redis = await get_redis()
     codes = [pos.code for pos in positions]
-    cached = await redis.mget([f"price:{c}" for c in codes])
-    price_map = {codes[i]: float(cached[i]) for i in range(len(codes)) if cached[i]}
+    price_map: dict[str, float] = {}
+
+    # Try Redis cache first
+    try:
+        from app.core.redis import get_redis
+        redis = await get_redis()
+        cached = await redis.mget([f"price:{c}" for c in codes])
+        price_map = {codes[i]: float(cached[i]) for i in range(len(codes)) if cached[i]}
+    except Exception:
+        pass
+
+    # If any codes missing from cache, fetch live prices from Tencent
+    missing = [c for c in codes if c not in price_map]
+    if missing:
+        import asyncio as _asyncio
+        loop = _asyncio.get_running_loop()
+        live_prices = await loop.run_in_executor(None, refresh_live_prices, missing)
+        price_map.update(live_prices)
 
     records = []
     for pos in positions:

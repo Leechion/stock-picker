@@ -1,7 +1,10 @@
 <template>
   <div class="settings-view">
     <div class="page-header">
-      <h2 class="page-title">系统设置</h2>
+      <div class="page-title-group">
+        <h2 class="page-title">系统设置</h2>
+        <span class="page-subtitle">策略参数配置 · 回测规则管理</span>
+      </div>
     </div>
 
     <div class="settings-grid">
@@ -216,12 +219,24 @@ onMounted(() => {
 
 .page-header { margin-bottom: 20px; }
 
+.page-title-group {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
 .page-title {
   margin: 0;
-  font-size: 20px;
-  font-weight: 600;
+  font-size: 22px;
+  font-weight: 700;
   color: var(--text-primary);
   letter-spacing: -0.02em;
+}
+
+.page-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 400;
 }
 
 .font-mono { font-family: 'Fira Code', monospace; }

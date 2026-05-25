@@ -19,10 +19,11 @@ def setup_logging() -> None:
             level="DEBUG",
         )
     from pathlib import Path
-    Path("logs").mkdir(parents=True, exist_ok=True)
+    log_dir = Path(__file__).resolve().parents[3] / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     logger.add(
-        "logs/app_{time:YYYY-MM-DD}.log",
+        str(log_dir / "app_{time:YYYY-MM-DD}.log"),
         rotation="00:00",
         retention="30 days",
         level="INFO",
