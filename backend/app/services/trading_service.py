@@ -414,12 +414,15 @@ async def update_account_value(session: AsyncSession, account: TradingAccount) -
     if not positions:
         account.total_value = round(account.cash, 2)
         account.updated_at = datetime.now()
+        daily_pnl = round(account.total_value - account.prev_close_value, 2)
         return {
             "total_value": account.total_value,
             "cash": round(account.cash, 2),
             "position_value": 0.0,
             "pnl": round(account.total_value - account.initial_capital, 2),
             "pnl_pct": round((account.total_value / account.initial_capital - 1) * 100, 2),
+            "daily_pnl": daily_pnl,
+            "daily_pnl_pct": round(daily_pnl / account.prev_close_value * 100, 2) if account.prev_close_value > 0 else 0,
         }
 
     # Fetch live prices for accurate valuation
@@ -436,6 +439,7 @@ async def update_account_value(session: AsyncSession, account: TradingAccount) -
 
     account.total_value = round(account.cash + position_value, 2)
     account.updated_at = datetime.now()
+    daily_pnl = round(account.total_value - account.prev_close_value, 2)
 
     return {
         "total_value": account.total_value,
@@ -443,6 +447,8 @@ async def update_account_value(session: AsyncSession, account: TradingAccount) -
         "position_value": round(position_value, 2),
         "pnl": round(account.total_value - account.initial_capital, 2),
         "pnl_pct": round((account.total_value / account.initial_capital - 1) * 100, 2),
+        "daily_pnl": daily_pnl,
+        "daily_pnl_pct": round(daily_pnl / account.prev_close_value * 100, 2) if account.prev_close_value > 0 else 0,
     }
 
 
@@ -716,7 +722,7 @@ async def realtime_check(session: AsyncSession) -> list[dict]:
 
 
 async def post_market_update(session: AsyncSession) -> dict | None:
-    """Run after market close: update trailing stops, account value, return summary."""
+    """Run after market close: update trailing stops, account value, save close value for next day's daily P&L."""
     account = await get_or_create_account(session)
     if not account.is_active:
         return None
@@ -729,6 +735,9 @@ async def post_market_update(session: AsyncSession) -> dict | None:
         await update_trailing_state(session, pos)
 
     value_info = await update_account_value(session, account)
+
+    # Save today's total_value as prev_close_value for tomorrow's daily P&L
+    account.prev_close_value = account.total_value
     await session.commit()
 
     return value_info
