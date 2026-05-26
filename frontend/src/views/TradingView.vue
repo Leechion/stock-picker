@@ -45,6 +45,13 @@
         <div class="card-value font-mono">{{ formatMoney(account.position_value) }}</div>
       </div>
       <div class="account-card">
+        <div class="card-label">今日盈亏</div>
+        <div class="card-value font-mono" :class="(account.daily_pnl ?? 0) >= 0 ? 'text-up' : 'text-down'">
+          {{ (account.daily_pnl ?? 0) >= 0 ? '+' : '' }}{{ formatMoney(account.daily_pnl ?? 0) }}
+          <span class="pnl-pct">({{ (account.daily_pnl_pct ?? 0) >= 0 ? '+' : '' }}{{ (account.daily_pnl_pct ?? 0)?.toFixed(2) }}%)</span>
+        </div>
+      </div>
+      <div class="account-card">
         <div class="card-label">总盈亏</div>
         <div class="card-value font-mono" :class="account.pnl >= 0 ? 'text-up' : 'text-down'">
           {{ account.pnl >= 0 ? '+' : '' }}{{ formatMoney(account.pnl) }}
@@ -368,7 +375,7 @@ onBeforeUnmount(() => {
 
 .account-cards {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 12px;
   margin-bottom: 16px;
 }

@@ -83,6 +83,8 @@ export const useMonitorStore = defineStore('monitor', () => {
     position_value: 0,
     pnl: 0,
     pnl_pct: 0,
+    daily_pnl: 0,
+    daily_pnl_pct: 0,
     is_active: false,
   })
   const recentTrades = ref<Record<string, unknown>[]>([])
