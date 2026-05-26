@@ -17,6 +17,7 @@ class TradingAccount(Base):
     initial_capital: Mapped[float] = mapped_column(Float, default=500000.0)
     cash: Mapped[float] = mapped_column(Float, default=500000.0)
     total_value: Mapped[float] = mapped_column(Float, default=500000.0)
+    prev_close_value: Mapped[float] = mapped_column(Float, default=500000.0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
