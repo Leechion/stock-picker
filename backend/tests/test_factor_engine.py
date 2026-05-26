@@ -24,14 +24,14 @@ def make_test_df(length: int = 100) -> pd.DataFrame:
 CODE = "600519"
 
 
-def test_compute_factors_returns_all_16_factors():
+def test_compute_factors_returns_all_factors():
     df = make_test_df(120)
     factors = compute_factors_for_stock(df, CODE)
-    assert len(factors) == 16
+    assert len(factors) == 19
     types = [f["factor_type"].value for f in factors]
     assert types.count("technical") == 6
     assert types.count("fundamental") == 6
-    assert types.count("sentiment") == 4
+    assert types.count("sentiment") == 7
 
 
 def test_compute_factors_empty_df():
