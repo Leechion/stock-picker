@@ -625,19 +625,18 @@ async def pre_market_check(session: AsyncSession) -> list[dict]:
     stmt = select(Position).where(Position.account_id == account.id)
     result = await session.execute(stmt)
     existing = {p.code: p for p in result.scalars().all()}
-    top_codes = {r["code"] for r in records[:10]}
 
-    # Monday: sell positions ranked out of top 15
-    if today.weekday() == 0:  # Monday
-        top15_codes = {r["code"] for r in records[:15]}
-        for code, pos in existing.items():
-            if code not in top15_codes:
-                price = await get_latest_price(session, code) or pos.avg_cost
-                log = await execute_sell(
-                    session, account, pos, price,
-                    reason=f"周一调仓 排名跌出前15",
-                )
-                actions.append({"action": "sell", "code": code, "name": pos.name, "reason": "调仓"})
+    # Daily: sell positions not in current top 10
+    top10_codes = {r["code"] for r in records[:10]}
+    for code, pos in list(existing.items()):
+        if code not in top10_codes:
+            price = await get_latest_price(session, code) or pos.avg_cost
+            log = await execute_sell(
+                session, account, pos, price,
+                reason=f"调仓 排名跌出前10",
+            )
+            del existing[code]
+            actions.append({"action": "sell", "code": code, "name": pos.name, "reason": "调仓"})
 
     # Check pyramid add conditions for existing positions
     for code, pos in existing.items():
@@ -649,11 +648,17 @@ async def pre_market_check(session: AsyncSession) -> list[dict]:
     for r in records[:10]:
         if r["code"] in existing:
             continue
-        name = r.get("name", "")
-        if "ST" in name.upper():
-            continue
         if len(existing) + sum(1 for a in actions if a.get("action") == "buy") >= 10:
             break
+
+        name = r.get("name", "")
+        if not name:
+            name_stmt = select(StockInfo.name).where(StockInfo.code == r["code"])
+            name_result = await session.execute(name_stmt)
+            name = name_result.scalar_one_or_none() or r["code"]
+        if "ST" in name.upper():
+            logger.info(f"Skipping ST stock {r['code']} {name}")
+            continue
 
         price = await get_latest_price(session, r["code"])
         if not price or price <= 0:
@@ -662,11 +667,6 @@ async def pre_market_check(session: AsyncSession) -> list[dict]:
         atr = await compute_atr(session, r["code"])
         if not atr:
             continue
-
-        if not name:
-            name_stmt = select(StockInfo.name).where(StockInfo.code == r["code"])
-            name_result = await session.execute(name_stmt)
-            name = name_result.scalar_one_or_none() or r["code"]
 
         log = await execute_buy(
             session, account, r["code"], name, r["rank"], price, atr,
