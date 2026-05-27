@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.services.trading_service import (
-    get_or_create_account,
+    get_account,
     get_positions_with_prices,
     get_trade_logs,
     update_account_value,
@@ -36,8 +36,21 @@ def _err(message, code=400):
 
 
 @router.get("/trading/account")
-async def get_account(session: AsyncSession = Depends(get_db)):
-    account = await get_or_create_account(session)
+async def get_account_endpoint(session: AsyncSession = Depends(get_db)):
+    account = await get_account(session)
+    if account is None:
+        return _ok({
+            "id": None,
+            "initial_capital": 500000.0,
+            "cash": 500000.0,
+            "total_value": 500000.0,
+            "is_active": False,
+            "position_value": 0.0,
+            "pnl": 0.0,
+            "pnl_pct": 0.0,
+            "daily_pnl": 0.0,
+            "daily_pnl_pct": 0.0,
+        })
     value_info = await update_account_value(session, account)
     await session.commit()
     return _ok({
@@ -52,7 +65,9 @@ async def get_account(session: AsyncSession = Depends(get_db)):
 
 @router.get("/trading/positions")
 async def get_positions(session: AsyncSession = Depends(get_db)):
-    account = await get_or_create_account(session)
+    account = await get_account(session)
+    if account is None:
+        return _ok([])
     records = await get_positions_with_prices(session, account.id)
     return _ok(records)
 
@@ -63,7 +78,9 @@ async def list_trade_logs(
     page_size: int = Query(default=20, ge=1, le=100),
     session: AsyncSession = Depends(get_db),
 ):
-    account = await get_or_create_account(session)
+    account = await get_account(session)
+    if account is None:
+        return _ok({"items": [], "total": 0, "page": page, "page_size": page_size, "total_pages": 0})
     records, total = await get_trade_logs(session, account.id, page, page_size)
     return _ok({
         "items": records,
@@ -106,7 +123,9 @@ async def daily_summary(session: AsyncSession = Depends(get_db)):
     import asyncio
     from app.services.trading_service import refresh_live_prices
 
-    account = await get_or_create_account(session)
+    account = await get_account(session)
+    if account is None:
+        return _err("无交易账户")
     from app.models.trading import Position
     from sqlalchemy import select
     stmt = select(Position).where(Position.account_id == account.id)

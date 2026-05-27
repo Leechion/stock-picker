@@ -79,15 +79,15 @@ def _macd_histogram_direction_score(close: pd.Series) -> float:
 
 
 def _rsi_score(close: pd.Series) -> float:
-    """RSI: below 30 = oversold (bullish, 1), above 70 = overbought (bearish, -1)."""
+    """RSI: below 20 = oversold (bullish, 1), above 80 = overbought (bearish, -1)."""
     rsi_series = compute_rsi(close.to_frame())
     rsi_val = rsi_series.iloc[-1] if not rsi_series.empty and not np.isnan(rsi_series.iloc[-1]) else 50.0
     if rsi_val <= 20:
         return 1.0
     elif rsi_val >= 80:
         return -1.0
-    # Linear interpolation in [30, 70]
-    return (1.0 - (rsi_val - 30) / 40.0) * 2.0
+    # Linear interpolation in [20, 80], clamped to [-1, 1]
+    return float(np.clip((1.0 - (rsi_val - 30) / 40.0) * 2.0, -1.0, 1.0))
 
 
 def _kdj_score(close: pd.Series, high: pd.Series, low: pd.Series) -> float:
@@ -505,7 +505,7 @@ def standardize_factors_cross_sectional(
         std_factors: list[dict[str, Any]] = []
         for f in factors:
             mean, std = factor_stats[f["factor_name"]]
-            z = (f["value"] - mean) / std if std > 0 else f["value"]
+            z = (f["value"] - mean) / std if std > 0 else 0.0
             std_factors.append({**f, "value": float(z)})
         result[code] = std_factors
 
@@ -688,13 +688,16 @@ async def compute_all_factors(
 async def compute_factors_for_all_stocks(session: AsyncSession) -> int:
     """Fetch all stocks from DB, compute factors for each.
 
+    Excludes ST stocks and stocks with price > 100.
+
     Returns
     -------
     int
         Number of stocks for which factors were computed.
     """
-    result = await session.execute(select(StockInfo.code))
-    codes = list(result.scalars().all())
+    from app.services.ranking_service import get_eligible_codes
+    codes = sorted(await get_eligible_codes(session))
+    logger.info(f"Eligible stocks for factor computation: {len(codes)} (excluded ST & price>100)")
     if not codes:
         logger.warning("No stocks in DB, cannot compute factors")
         return 0

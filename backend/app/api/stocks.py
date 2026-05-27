@@ -86,10 +86,20 @@ async def trigger_sync(
     include_history: bool = Query(default=True),
     session: AsyncSession = Depends(get_db),
 ):
+    from app.services.data_service import sync_cancel_event
+    sync_cancel_event.clear()
     count = await sync_all_stocks(session, days_back, include_history)
     # Invalidate all stock-related caches
     cache.invalidate("stock_")
     return _ok({"status": "success", "message": f"Synced {count} stocks", "stock_count": count})
+
+
+@router.post("/stocks/sync-cancel")
+async def cancel_sync():
+    """Cancel an in-progress stock sync."""
+    from app.services.data_service import sync_cancel_event
+    sync_cancel_event.set()
+    return _ok({"status": "cancelled", "message": "Sync cancellation requested"})
 
 
 @router.get("/stocks/fundamentals")

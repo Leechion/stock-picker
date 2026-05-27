@@ -52,6 +52,29 @@ async def get_rankings(
     })
 
 
+@router.get("/rankings/history/{code}")
+async def get_ranking_history_endpoint(
+    code: str,
+    days: int = Query(default=30, ge=7, le=365),
+    strategy: str = Query(default=None),
+    session: AsyncSession = Depends(get_db),
+):
+    from app.services.ranking_service import get_ranking_history
+    history = await get_ranking_history(session, code, days, strategy)
+    return _ok(history)
+
+
+@router.get("/rankings/peers/{code}")
+async def get_peer_stocks_endpoint(
+    code: str,
+    strategy: str = Query(default=None),
+    session: AsyncSession = Depends(get_db),
+):
+    from app.services.ranking_service import get_peer_stocks
+    peers = await get_peer_stocks(session, code, strategy)
+    return _ok(peers)
+
+
 @router.get("/rankings/{code}")
 async def get_stock_rank_endpoint(
     code: str,
@@ -82,10 +105,14 @@ async def compute_ranking(
     from app.models.stock import StockInfo, FactorValue, StockFundamental
     from sqlalchemy import delete as sql_delete, insert
 
+    # Filter: exclude ST stocks and price > 100
+    from app.services.ranking_service import get_eligible_codes
+    eligible = await get_eligible_codes(session)
+
     result = await session.execute(select(StockInfo.code, StockInfo.industry))
-    stocks = result.all()
+    stocks = [(code, ind) for code, ind in result.all() if code in eligible]
     if not stocks:
-        return _err("No stocks found", 400)
+        return _err("No eligible stocks found", 400)
 
     codes = [row[0] for row in stocks]
     industry_map = {row[0]: row[1] for row in stocks}
@@ -143,11 +170,14 @@ async def compute_ranking(
 
         await asyncio.gather(*[process_stock(c) for c in codes])
 
-        # Batch delete + insert
-        await session.execute(sql_delete(FactorValue))
-        for i in range(0, len(all_records), 500):
-            await session.execute(insert(FactorValue), all_records[i:i + 500])
-        await session.commit()
+        # Batch delete + insert (only if we have new data)
+        if all_records:
+            await session.execute(sql_delete(FactorValue))
+            for i in range(0, len(all_records), 500):
+                await session.execute(insert(FactorValue), all_records[i:i + 500])
+            await session.commit()
+        else:
+            logger.warning("No factor records computed, skipping delete/insert")
 
         target = trading_date or date.today()
         from app.services.ranking_service import compute_all_rankings

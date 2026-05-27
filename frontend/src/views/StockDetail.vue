@@ -93,6 +93,29 @@
             </div>
             <div v-else class="empty-section">暂无因子数据</div>
           </div>
+
+          <!-- Ranking Trend -->
+          <div class="panel-section" v-if="rankingHistory.length > 0">
+            <div class="section-title">排名趋势 (30日)</div>
+            <div ref="historyChartRef" class="history-chart"></div>
+          </div>
+
+          <!-- Peers -->
+          <div class="panel-section" v-if="peers.length > 0">
+            <div class="section-title">同行业对比</div>
+            <div class="peers-list">
+              <div
+                class="peer-row"
+                v-for="p in peers"
+                :key="p.code"
+                :class="{ 'peer-self': p.is_self }"
+              >
+                <span class="peer-rank font-mono">#{{ p.rank_position }}</span>
+                <span class="peer-name">{{ p.name }}</span>
+                <span class="peer-score font-mono">{{ p.total_score }}</span>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- Chart -->
@@ -171,7 +194,7 @@ import { ArrowLeft } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import { useStocksStore } from '@/store'
 import { getStockHistory, getStockInfo, getStockFundamentals } from '@/api/stocks'
-import { getStockRank } from '@/api/ranking'
+import { getStockRank, getRankingHistory, getPeerStocks } from '@/api/ranking'
 import { getActiveStrategy } from '@/api/strategy'
 import { getFactors } from '@/api/factors'
 import { formatChangePct, formatVolume, formatTurnover, getScoreColor } from '@/utils/format'
@@ -189,6 +212,10 @@ const chartHeight = ref(450)
 const ranking = ref<RankingItem | null>(null)
 const fundamentals = ref<Record<string, number | null> | null>(null)
 const factorGroups = ref<{ technical: { name: string; value: number }[]; fundamental: { name: string; value: number }[]; sentiment: { name: string; value: number }[] }>({ technical: [], fundamental: [], sentiment: [] })
+const rankingHistory = ref<Record<string, unknown>[]>([])
+const peers = ref<{ code: string; name: string; total_score: number; rank_position: number; is_self: boolean }[]>([])
+const historyChartRef = ref<HTMLDivElement>()
+const historyChartInstance = ref<echarts.ECharts>()
 const activeIndicator = ref('')
 const realtimeQuote = ref<Record<string, number | null> | null>(null)
 const refreshTimer = ref<number | null>(null)
@@ -570,6 +597,57 @@ async function loadFactors() {
   } catch { /* ignore */ }
 }
 
+async function loadRankingHistory() {
+  try {
+    const { data: stratData } = await getActiveStrategy()
+    const resp = await getRankingHistory(code.value, 30, stratData.slug)
+    rankingHistory.value = Array.isArray(resp.data) ? resp.data : []
+    if (rankingHistory.value.length > 0) {
+      await nextTick()
+      renderHistoryChart()
+    }
+  } catch { rankingHistory.value = [] }
+}
+
+async function loadPeers() {
+  try {
+    const { data: stratData } = await getActiveStrategy()
+    const resp = await getPeerStocks(code.value, stratData.slug)
+    peers.value = Array.isArray(resp.data) ? resp.data : []
+  } catch { peers.value = [] }
+}
+
+function renderHistoryChart() {
+  if (!historyChartRef.value || rankingHistory.value.length === 0) return
+  if (!historyChartInstance.value) {
+    historyChartInstance.value = echarts.init(historyChartRef.value)
+  }
+  const c = chartColors()
+  const data = rankingHistory.value
+  const dates = data.map(d => String(d.rank_date))
+  const scores = data.map(d => d.total_score)
+  const techScores = data.map(d => d.tech_score)
+  const fundScores = data.map(d => d.fund_score)
+  const ranks = data.map(d => d.rank_position)
+
+  historyChartInstance.value.setOption({
+    tooltip: { trigger: 'axis' },
+    legend: { data: ['综合评分', '技术面', '基本面', '排名'], textStyle: { color: c.legendText, fontSize: 10 }, top: 0 },
+    grid: { left: '8%', right: '8%', top: '30', bottom: '20' },
+    xAxis: { type: 'category', data: dates, axisLabel: { color: c.axisLabel, fontSize: 10 }, axisLine: { lineStyle: { color: c.axisLine } } },
+    yAxis: [
+      { type: 'value', name: '评分', min: 0, max: 100, axisLabel: { color: c.axisLabel, fontSize: 10 }, splitLine: { lineStyle: { color: c.splitLine } } },
+      { type: 'value', name: '排名', inverse: true, axisLabel: { color: c.axisLabel, fontSize: 10 }, splitLine: { show: false } },
+    ],
+    series: [
+      { name: '综合评分', type: 'line', data: scores, smooth: true, showSymbol: false, lineStyle: { width: 2, color: '#a78bfa' }, areaStyle: { color: 'rgba(167,139,250,0.08)' } },
+      { name: '技术面', type: 'line', data: techScores, smooth: true, showSymbol: false, lineStyle: { width: 1, color: '#3b82f6' } },
+      { name: '基本面', type: 'line', data: fundScores, smooth: true, showSymbol: false, lineStyle: { width: 1, color: '#22c55e' } },
+      { name: '排名', type: 'line', yAxisIndex: 1, data: ranks, smooth: true, showSymbol: false, lineStyle: { width: 1.5, color: '#f59e0b', type: 'dashed' } },
+    ],
+  }, true)
+}
+
 async function loadHistory() {
   loading.value = true
   try {
@@ -671,7 +749,7 @@ function renderIntradayChart(data: Record<string, unknown>[], preClose: number) 
     dataZoomIdx.push(1)
     series.push(
       { name: '分时', type: 'line', data: closes, smooth: true, showSymbol: false, lineStyle: { width: 1.5, color: lineColor }, areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: areaTop }, { offset: 1, color: areaBottom }]) }, markLine: { silent: true, symbol: 'none', lineStyle: { color: c.markLine, type: 'dashed', width: 1 }, label: { formatter: '昨收 ' + preClose.toFixed(2), color: c.markLabel, fontSize: 10, position: 'insideStartTop' }, data: [{ yAxis: preClose }] } },
-      { name: '成交量', type: 'bar', data: volumes, xAxisIndex: 1, yAxisIndex: 1, itemStyle: { color: (p: unknown) => { const idx = (p as {dataIndex:number}).dataIndex; const item = data[idx]; return item && Number(item.close) >= Number(item.open) ? 'rgba(239,68,68,0.4)' : 'rgba(34,197,94,0.4)' } } },
+      { name: '成交量', type: 'bar', data: volumes, xAxisIndex: 1, yAxisIndex: 1, itemStyle: { color: (p: unknown) => { const idx = (p as {dataIndex:number}).dataIndex; return closes[idx] >= preClose ? 'rgba(239,68,68,0.4)' : 'rgba(34,197,94,0.4)' } } },
     )
   } else {
     grids.push(
@@ -715,7 +793,7 @@ function renderIntradayChart(data: Record<string, unknown>[], preClose: number) 
     }
 
     series.push(
-      { name: '成交量', type: 'bar', data: volumes, xAxisIndex: 2, yAxisIndex: 2, itemStyle: { color: (p: unknown) => { const idx = (p as {dataIndex:number}).dataIndex; const item = data[idx]; return item && Number(item.close) >= Number(item.open) ? 'rgba(239,68,68,0.4)' : 'rgba(34,197,94,0.4)' } } },
+      { name: '成交量', type: 'bar', data: volumes, xAxisIndex: 2, yAxisIndex: 2, itemStyle: { color: (p: unknown) => { const idx = (p as {dataIndex:number}).dataIndex; return closes[idx] >= preClose ? 'rgba(239,68,68,0.4)' : 'rgba(34,197,94,0.4)' } } },
     )
   }
 
@@ -746,6 +824,8 @@ onMounted(() => {
   loadRanking()
   loadFundamentals()
   loadFactors()
+  loadRankingHistory()
+  loadPeers()
 })
 
 // Watch for detail to load → chart element renders → then init chart + load history
@@ -763,6 +843,7 @@ const stopWatch = watch(detail, async (val) => {
 onBeforeUnmount(() => {
   stopAutoRefresh()
   chartInstance.value?.dispose()
+  historyChartInstance.value?.dispose()
   window.removeEventListener('resize', resizeChart)
 })
 </script>
@@ -972,5 +1053,17 @@ onBeforeUnmount(() => {
 }
 
 .kline-chart { width: 100%; min-height: 350px; }
+.history-chart { width: 100%; height: 180px; }
 .table-card { border-radius: 10px; }
+
+/* Peers */
+.peers-list { display: flex; flex-direction: column; gap: 2px; }
+.peer-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 6px; border-radius: 4px; font-size: 11px;
+}
+.peer-self { background: rgba(167,139,250,0.12); font-weight: 600; }
+.peer-rank { width: 28px; color: var(--text-muted); font-size: 10px; }
+.peer-name { flex: 1; color: var(--text-secondary); }
+.peer-score { font-weight: 600; color: var(--text-primary); }
 </style>

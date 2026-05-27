@@ -9,7 +9,7 @@ from loguru import logger
 
 from app.core.config import settings
 from app.core.database import Base, engine
-from app.api import health, stocks, factors, ranking, strategy, sectors, backtest, trading, monitor, wechat
+from app.api import health, stocks, factors, ranking, strategy, sectors, backtest, trading, monitor, wechat, alerts
 
 
 @asynccontextmanager
@@ -31,12 +31,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async def _startup_price_refresh():
         await _asyncio.sleep(1)
         try:
-            from app.services.trading_service import get_or_create_account, refresh_live_prices
+            from app.services.trading_service import get_account, refresh_live_prices
             from app.models.trading import Position
             from sqlalchemy import select
             from app.core.database import AsyncSessionLocal
             async with AsyncSessionLocal() as session:
-                account = await get_or_create_account(session)
+                account = await get_account(session)
+                if account is None:
+                    return
                 stmt = select(Position.code).where(Position.account_id == account.id)
                 result = await session.execute(stmt)
                 codes = list(result.scalars().all())
@@ -60,22 +62,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await monitor_hub.stop_broadcast_loop()
         shutdown_scheduler()
 
-        # Dispose DB engine first, while internal tasks are still alive
         try:
             await engine.dispose()
         except Exception:
             pass
-
-        # Cancel remaining user tasks with a short timeout
-        current = _asyncio.current_task()
-        tasks = [t for t in _asyncio.all_tasks() if t is not current]
-        for t in tasks:
-            t.cancel()
-        if tasks:
-            try:
-                await _asyncio.wait_for(_asyncio.gather(*tasks, return_exceptions=True), timeout=3)
-            except (TimeoutError, _asyncio.CancelledError):
-                pass
 
         logger.info("Shutdown complete")
 
@@ -108,6 +98,7 @@ def create_app() -> FastAPI:
     app.include_router(trading.router, prefix="/api")
     app.include_router(monitor.router, prefix="/api")
     app.include_router(wechat.router, prefix="/api")
+    app.include_router(alerts.router, prefix="/api")
 
     return app
 

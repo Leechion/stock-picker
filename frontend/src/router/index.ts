@@ -39,6 +39,18 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '模拟交易' },
   },
   {
+    path: '/backtest',
+    name: 'Backtest',
+    component: () => import('@/views/BacktestView.vue'),
+    meta: { title: '策略回测' },
+  },
+  {
+    path: '/alerts',
+    name: 'Alerts',
+    component: () => import('@/views/AlertView.vue'),
+    meta: { title: '智能预警' },
+  },
+  {
     path: '/settings',
     name: 'Settings',
     component: () => import('@/views/Settings.vue'),
