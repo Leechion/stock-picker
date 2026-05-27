@@ -13,8 +13,42 @@ from app.services.data_providers import provider_manager
 MAIN_BOARD_PREFIXES = ("00", "60")
 MAX_CONCURRENCY = 20
 
+
+async def _redis_get(key: str) -> dict | None:
+    """Get a cached sync result from Redis. Returns None on miss or error."""
+    try:
+        import json
+        from datetime import date as dt_date
+        from app.core.redis import get_redis
+        redis = await get_redis()
+        raw = await redis.get(key)
+        if raw:
+            data = json.loads(raw)
+            # Convert trade_date strings back to date objects
+            for rec in data.get("daily_records", []):
+                td = rec.get("trade_date")
+                if isinstance(td, str):
+                    rec["trade_date"] = dt_date.fromisoformat(td)
+            return data
+    except Exception:
+        pass
+    return None
+
+
+async def _redis_set(key: str, data: dict, ttl: int = 86400) -> None:
+    """Cache a sync result in Redis."""
+    try:
+        import json
+        from app.core.redis import get_redis
+        redis = await get_redis()
+        await redis.set(key, json.dumps(data, ensure_ascii=False, default=str), ex=ttl)
+    except Exception:
+        pass
+
 # Set when the server is shutting down — checked in long-running sync loops
 shutdown_event = asyncio.Event()
+# Set by cancel-sync API to stop an in-progress sync
+sync_cancel_event = asyncio.Event()
 
 EASTMONEY_HEADERS = {
     "User-Agent": (
@@ -49,19 +83,21 @@ async def _fetch_one_stock(
 ) -> dict | None:
     """Fetch daily data for a single stock with concurrency control.
 
+    Checks Redis cache first — if today's data was already synced, skips HTTP fetch.
     Returns a dict with stock info + daily records, or None if filtered/skipped.
     """
+    today_str = date.today().isoformat()
+    cache_key = f"sync:{today_str}:{code}"
+
+    # Check Redis cache first
+    cached = await _redis_get(cache_key)
+    if cached is not None:
+        return cached
+
     async with semaphore:
         df = await fetch_daily_data(code, start_str, end_str)
     if df.empty:
         return None
-
-    # Filter: skip stocks with latest close price > 70
-    close_col = "close" if "close" in df.columns else None
-    if close_col:
-        latest_close = pd.to_numeric(df[close_col], errors="coerce").dropna()
-        if not latest_close.empty and latest_close.iloc[-1] > 70:
-            return None
 
     col_map = {
         "日期": "trade_date",
@@ -108,12 +144,17 @@ async def _fetch_one_stock(
             }
         )
 
-    return {
+    result = {
         "code": code,
         "name": name,
         "industry": str(industry) if pd.notna(industry) else None,
         "daily_records": daily_records,
     }
+
+    # Cache in Redis with 24h TTL
+    await _redis_set(cache_key, result, ttl=86400)
+
+    return result
 
 
 async def _load_sync_state(session: AsyncSession) -> dict[str, date]:
@@ -122,6 +163,19 @@ async def _load_sync_state(session: AsyncSession) -> dict[str, date]:
     stmt = select(StockDaily.code, func.max(StockDaily.trade_date)).group_by(StockDaily.code)
     result = await session.execute(stmt)
     return {code: latest for code, latest in result.all()}
+
+
+def _broadcast_sync_progress(done: int, total: int, status: str) -> None:
+    """Fire-and-forget sync progress broadcast to WebSocket clients."""
+    try:
+        import asyncio
+        from app.core.websocket import monitor_hub
+        loop = asyncio.get_running_loop()
+        loop.create_task(monitor_hub.broadcast("sync_progress", {
+            "done": done, "total": total, "status": status,
+        }))
+    except RuntimeError:
+        pass
 
 
 async def sync_all_stocks(session: AsyncSession, days_back: int = 80, include_history: bool = True) -> int:
@@ -185,7 +239,7 @@ async def sync_all_stocks(session: AsyncSession, days_back: int = 80, include_hi
     semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
 
     async def _fetch_with_state(code, name, industry, latest):
-        if shutdown_event.is_set():
+        if shutdown_event.is_set() or sync_cancel_event.is_set():
             return None
         if latest:
             fetch_start = (latest + timedelta(days=1)).strftime("%Y%m%d")
@@ -195,12 +249,27 @@ async def sync_all_stocks(session: AsyncSession, days_back: int = 80, include_hi
             return None
         return await _fetch_one_stock(code, name, industry, fetch_start, end_str, semaphore)
 
-    tasks = [_fetch_with_state(code, name, ind, lat) for code, name, ind, lat in candidates]
+    # Track progress with a shared counter
+    progress_done = 0
+    progress_lock = asyncio.Lock()
+
+    async def _fetch_with_progress(code, name, industry, latest):
+        nonlocal progress_done
+        result = await _fetch_with_state(code, name, industry, latest)
+        async with progress_lock:
+            progress_done += 1
+            if progress_done % 50 == 0 or progress_done == len(candidates):
+                _broadcast_sync_progress(progress_done, len(candidates), "syncing")
+        return result
+
+    # Broadcast initial progress
+    _broadcast_sync_progress(0, len(candidates), "syncing")
+
+    tasks = [_fetch_with_progress(code, name, ind, lat) for code, name, ind, lat in candidates]
     try:
         results = await asyncio.gather(*tasks, return_exceptions=True)
     except asyncio.CancelledError:
         logger.warning("Stock sync cancelled, cleaning up...")
-        # Cancel all pending tasks
         for t in tasks:
             if not t.done():
                 t.cancel()
@@ -208,9 +277,14 @@ async def sync_all_stocks(session: AsyncSession, days_back: int = 80, include_hi
 
     synced_records: list[dict] = []
     for i, result in enumerate(results):
-        if shutdown_event.is_set():
-            logger.warning("Shutdown requested, stopping sync early")
-            break
+        if shutdown_event.is_set() or sync_cancel_event.is_set():
+            logger.warning("Sync cancelled, stopping early")
+            _broadcast_sync_progress(i, len(candidates), "cancelled")
+            if synced_records:
+                for j in range(0, len(synced_records), 500):
+                    await session.execute(insert(StockDaily), synced_records[j : j + 500])
+                await session.commit()
+            return len(inserted_codes)
         if isinstance(result, Exception):
             code = candidates[i][0]
             logger.debug(f"Fetch failed for {code}: {result}")
@@ -233,6 +307,8 @@ async def sync_all_stocks(session: AsyncSession, days_back: int = 80, include_hi
 
         synced_records.extend(result["daily_records"])
 
+    _broadcast_sync_progress(len(candidates), len(candidates), "saving")
+
     for i in range(0, len(synced_records), 500):
         await session.execute(insert(StockDaily), synced_records[i : i + 500])
 
@@ -248,6 +324,7 @@ async def sync_all_stocks(session: AsyncSession, days_back: int = 80, include_hi
     except Exception:
         pass
 
+    _broadcast_sync_progress(len(candidates), len(candidates), "complete")
     logger.info(
         f"Sync complete: {len(inserted_codes)} stocks, {len(synced_records)} daily records, "
         f"concurrency={MAX_CONCURRENCY}"

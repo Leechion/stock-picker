@@ -29,10 +29,13 @@ Example YAML (strategies/default.yaml):
         profit_growth_score: { weight: 0.15 }
         debt_ratio_score: { weight: 0.05 }
       sentiment:
-        turnover_score: { weight: 0.25 }
-        capital_flow_score: { weight: 0.35 }
-        momentum_5d_score: { weight: 0.20 }
-        momentum_20d_score: { weight: 0.20 }
+        turnover_score: { weight: 0.12 }
+        capital_flow_score: { weight: 0.12 }
+        real_capital_flow_score: { weight: 0.22 }
+        chip_concentration_score: { weight: 0.12 }
+        sector_heat_score: { weight: 0.17 }
+        momentum_5d_score: { weight: 0.12 }
+        momentum_20d_score: { weight: 0.13 }
 """
 
 from __future__ import annotations
@@ -71,10 +74,13 @@ _DEFAULT_STRATEGY: dict[str, Any] = {
             "debt_ratio_score": {"weight": 0.05},
         },
         "sentiment": {
-            "turnover_score": {"weight": 0.25},
-            "capital_flow_score": {"weight": 0.35},
-            "momentum_5d_score": {"weight": 0.20},
-            "momentum_20d_score": {"weight": 0.20},
+            "turnover_score": {"weight": 0.12},
+            "capital_flow_score": {"weight": 0.12},
+            "real_capital_flow_score": {"weight": 0.22},
+            "chip_concentration_score": {"weight": 0.12},
+            "sector_heat_score": {"weight": 0.17},
+            "momentum_5d_score": {"weight": 0.12},
+            "momentum_20d_score": {"weight": 0.13},
         },
     },
 }

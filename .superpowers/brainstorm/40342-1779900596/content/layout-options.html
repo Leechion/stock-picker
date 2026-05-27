@@ -1,0 +1,179 @@
+<h2>因子分析页面 - 排版方案</h2>
+<p class="subtitle">选一个你觉得最好的布局风格，我来实现</p>
+
+<style>
+  .mock { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; border-radius: 12px; overflow: hidden; }
+  .mock-dark { background: #1a1a2e; color: #e0e0e0; }
+  .m-header { padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.06); }
+  .m-title { font-size: 16px; font-weight: 700; color: #fff; }
+  .m-sub { font-size: 11px; color: rgba(255,255,255,0.4); }
+  .m-input { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 6px 12px; color: #fff; font-size: 12px; width: 140px; }
+  .m-btn { background: #7c3aed; color: #fff; border: none; border-radius: 6px; padding: 6px 14px; font-size: 12px; font-weight: 500; }
+  .m-body { padding: 16px; }
+
+  /* Score bars */
+  .score-row { display: flex; gap: 10px; margin-bottom: 14px; }
+  .score-card { flex: 1; background: rgba(255,255,255,0.04); border-radius: 10px; padding: 14px 16px; }
+  .sc-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .sc-label { font-size: 13px; font-weight: 600; color: #fff; }
+  .sc-level { font-size: 12px; font-weight: 600; }
+  .sc-bar { height: 5px; background: rgba(255,255,255,0.06); border-radius: 3px; overflow: hidden; }
+  .sc-fill { height: 100%; border-radius: 3px; }
+  .sc-desc { font-size: 10px; color: rgba(255,255,255,0.35); margin-top: 6px; }
+
+  /* Two col */
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .panel { background: rgba(255,255,255,0.04); border-radius: 10px; padding: 16px; }
+  .panel-t { font-size: 13px; font-weight: 600; color: #fff; margin-bottom: 4px; }
+  .panel-d { font-size: 10px; color: rgba(255,255,255,0.3); margin-bottom: 12px; }
+
+  /* Radar placeholder */
+  .radar-ph { width: 100%; height: 220px; background: radial-gradient(circle, rgba(124,58,237,0.08) 0%, transparent 70%); border-radius: 8px; display: flex; align-items: center; justify-content: center; position: relative; }
+  .radar-ph svg { width: 180px; height: 180px; }
+  .radar-ph .dot { width: 6px; height: 6px; background: #a78bfa; border-radius: 50%; position: absolute; }
+
+  /* Factor cards */
+  .f-list { display: flex; flex-direction: column; gap: 8px; max-height: 240px; overflow-y: auto; }
+  .f-card { padding: 10px 12px; background: rgba(255,255,255,0.03); border-radius: 8px; }
+  .f-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; }
+  .f-name { font-size: 12px; font-weight: 500; color: #e0e0e0; }
+  .f-lvl { font-size: 11px; font-weight: 600; }
+  .f-bar { height: 3px; background: rgba(255,255,255,0.05); border-radius: 2px; overflow: hidden; margin-bottom: 5px; }
+  .f-fill { height: 100%; border-radius: 2px; }
+  .f-desc { font-size: 10px; color: rgba(255,255,255,0.3); }
+
+  /* Option B: Big radar */
+  .big-radar { grid-column: 1 / -1; }
+  .big-radar .radar-ph { height: 280px; }
+  .big-radar .radar-ph svg { width: 240px; height: 240px; }
+
+  /* Option C: Gauge cards */
+  .gauge-row { display: flex; gap: 10px; margin-bottom: 14px; }
+  .gauge-card { flex: 1; background: rgba(255,255,255,0.04); border-radius: 10px; padding: 16px; text-align: center; }
+  .gauge-circle { width: 80px; height: 80px; border-radius: 50%; margin: 0 auto 10px; display: flex; align-items: center; justify-content: center; }
+  .gauge-num { font-size: 22px; font-weight: 700; color: #fff; }
+  .gauge-label { font-size: 12px; font-weight: 600; color: #fff; margin-bottom: 4px; }
+  .gauge-sub { font-size: 10px; color: rgba(255,255,255,0.35); }
+
+  /* Table */
+  .m-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  .m-table th { text-align: left; padding: 8px 10px; color: rgba(255,255,255,0.4); font-weight: 500; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 10px; }
+  .m-table td { padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.03); }
+  .m-table tr:hover td { background: rgba(255,255,255,0.02); }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 500; }
+  .tag-tech { background: rgba(99,102,241,0.15); color: #818cf8; }
+  .tag-fund { background: rgba(34,197,94,0.15); color: #4ade80; }
+  .tag-sent { background: rgba(245,158,11,0.15); color: #fbbf24; }
+</style>
+
+<div class="cards">
+  <!-- Option A -->
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mock mock-dark">
+        <div class="m-header">
+          <div><div class="m-title">因子分析</div><div class="m-sub">600519 贵州茅台</div></div>
+          <div style="display:flex;gap:6px"><span class="m-input">600519</span><button class="m-btn">查询</button></div>
+        </div>
+        <div class="m-body">
+          <div class="score-row">
+            <div class="score-card"><div class="sc-head"><span class="sc-label">技术面</span><span class="sc-level" style="color:#3b82f6">较强</span></div><div class="sc-bar"><div class="sc-fill" style="width:72%;background:#3b82f6"></div></div><div class="sc-desc">技术形态良好，均线偏多</div></div>
+            <div class="score-card"><div class="sc-head"><span class="sc-label">基本面</span><span class="sc-level" style="color:#22c55e">很强</span></div><div class="sc-bar"><div class="sc-fill" style="width:85%;background:#22c55e"></div></div><div class="sc-desc">估值合理，盈利能力强</div></div>
+            <div class="score-card"><div class="sc-head"><span class="sc-label">情绪面</span><span class="sc-level" style="color:#f59e0b">一般</span></div><div class="sc-bar"><div class="sc-fill" style="width:52%;background:#f59e0b"></div></div><div class="sc-desc">资金面中性</div></div>
+          </div>
+          <div class="two-col">
+            <div class="panel"><div class="panel-t">因子雷达图</div><div class="panel-d">越靠外越强</div><div class="radar-ph"><svg viewBox="0 0 200 200"><polygon points="100,20 170,65 155,145 45,145 30,65" fill="rgba(124,58,237,0.1)" stroke="rgba(124,58,237,0.3)" stroke-width="1"/><polygon points="100,50 145,80 135,130 65,130 55,80" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="0.5"/><polygon points="100,35 160,72 148,138 52,138 40,72" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/></svg></div></div>
+            <div class="panel"><div class="panel-t">因子详情</div><div class="panel-d">评分和含义</div>
+              <div class="f-list">
+                <div class="f-card"><div class="f-head"><span class="f-name">均线交叉</span><span class="f-lvl" style="color:#3b82f6">较强</span></div><div class="f-bar"><div class="f-fill" style="width:68%;background:#3b82f6"></div></div><div class="f-desc">短期均线上穿长期均线</div></div>
+                <div class="f-card"><div class="f-head"><span class="f-name">MACD动量</span><span class="f-lvl" style="color:#22c55e">很强</span></div><div class="f-bar"><div class="f-fill" style="width:82%;background:#22c55e"></div></div><div class="f-desc">上涨动能较强</div></div>
+                <div class="f-card"><div class="f-head"><span class="f-name">盈利能力(ROE)</span><span class="f-lvl" style="color:#22c55e">很强</span></div><div class="f-bar"><div class="f-fill" style="width:91%;background:#22c55e"></div></div><div class="f-desc">赚钱能力很强</div></div>
+                <div class="f-card"><div class="f-head"><span class="f-name">资金流向</span><span class="f-lvl" style="color:#f59e0b">一般</span></div><div class="f-bar"><div class="f-fill" style="width:48%;background:#f59e0b"></div></div><div class="f-desc">主力资金关注度一般</div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. 卡片仪表盘</h3>
+      <p>顶部三大维度评分卡片 + 左右分栏（雷达图 + 因子列表）。信息密度高，一眼看清强弱。</p>
+    </div>
+  </div>
+
+  <!-- Option B -->
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mock mock-dark">
+        <div class="m-header">
+          <div><div class="m-title">因子分析</div><div class="m-sub">600519 贵州茅台</div></div>
+          <div style="display:flex;gap:6px"><span class="m-input">600519</span><button class="m-btn">查询</button></div>
+        </div>
+        <div class="m-body">
+          <div class="two-col" style="grid-template-columns: 3fr 2fr;">
+            <div class="panel big-radar"><div class="panel-t">因子雷达图</div><div class="panel-d">越大越强，看各维度是否均衡</div><div class="radar-ph" style="height:260px"><svg viewBox="0 0 200 200"><polygon points="100,15 175,60 160,150 40,150 25,60" fill="rgba(124,58,237,0.06)" stroke="rgba(255,255,255,0.05)" stroke-width="0.5"/><polygon points="100,35 155,75 142,138 58,138 45,75" fill="none" stroke="rgba(255,255,255,0.04)" stroke-width="0.5"/><polygon points="100,55 135,90 125,125 75,125 65,90" fill="none" stroke="rgba(255,255,255,0.03)" stroke-width="0.5"/><polygon points="100,30 165,68 150,143 50,143 35,68" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="2"/></svg></div></div>
+            <div style="display:flex;flex-direction:column;gap:10px;">
+              <div class="score-card"><div class="sc-head"><span class="sc-label">技术面</span><span class="sc-level" style="color:#3b82f6">72分 · 较强</span></div><div class="sc-bar"><div class="sc-fill" style="width:72%;background:#3b82f6"></div></div></div>
+              <div class="score-card"><div class="sc-head"><span class="sc-label">基本面</span><span class="sc-level" style="color:#22c55e">85分 · 很强</span></div><div class="sc-bar"><div class="sc-fill" style="width:85%;background:#22c55e"></div></div></div>
+              <div class="score-card"><div class="sc-head"><span class="sc-label">情绪面</span><span class="sc-level" style="color:#f59e0b">52分 · 一般</span></div><div class="sc-bar"><div class="sc-fill" style="width:52%;background:#f59e0b"></div></div></div>
+              <div class="panel" style="flex:1;padding:12px"><div class="panel-t" style="font-size:12px">因子明细</div>
+                <div class="f-list" style="max-height:120px">
+                  <div class="f-card" style="padding:6px 8px"><div class="f-head"><span class="f-name">均线交叉</span><span class="f-lvl" style="color:#3b82f6">68</span></div><div class="f-bar"><div class="f-fill" style="width:68%;background:#3b82f6"></div></div></div>
+                  <div class="f-card" style="padding:6px 8px"><div class="f-head"><span class="f-name">MACD动量</span><span class="f-lvl" style="color:#22c55e">82</span></div><div class="f-bar"><div class="f-fill" style="width:82%;background:#22c55e"></div></div></div>
+                  <div class="f-card" style="padding:6px 8px"><div class="f-head"><span class="f-name">盈利能力</span><span class="f-lvl" style="color:#22c55e">91</span></div><div class="f-bar"><div class="f-fill" style="width:91%;background:#22c55e"></div></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. 大雷达 + 侧栏</h3>
+      <p>雷达图占主视觉，右侧评分条和因子列表。更直观展示"这只股强在哪里"。</p>
+    </div>
+  </div>
+
+  <!-- Option C -->
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mock mock-dark">
+        <div class="m-header">
+          <div><div class="m-title">因子分析</div><div class="m-sub">600519 贵州茅台</div></div>
+          <div style="display:flex;gap:6px"><span class="m-input">600519</span><button class="m-btn">查询</button></div>
+        </div>
+        <div class="m-body">
+          <div class="gauge-row">
+            <div class="gauge-card">
+              <div class="gauge-circle" style="border: 4px solid #3b82f6; box-shadow: 0 0 12px rgba(99,102,241,0.2)"><span class="gauge-num" style="color:#3b82f6">72</span></div>
+              <div class="gauge-label">技术面</div><div class="gauge-sub">较强 · 均线偏多</div>
+            </div>
+            <div class="gauge-card">
+              <div class="gauge-circle" style="border: 4px solid #22c55e; box-shadow: 0 0 12px rgba(34,197,94,0.2)"><span class="gauge-num" style="color:#22c55e">85</span></div>
+              <div class="gauge-label">基本面</div><div class="gauge-sub">很强 · 估值合理</div>
+            </div>
+            <div class="gauge-card">
+              <div class="gauge-circle" style="border: 4px solid #f59e0b; box-shadow: 0 0 12px rgba(245,158,11,0.2)"><span class="gauge-num" style="color:#f59e0b">52</span></div>
+              <div class="gauge-label">情绪面</div><div class="gauge-sub">一般 · 资金中性</div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-t">因子详情</div><div class="panel-d">每个因子的评分、含义和原始数据</div>
+            <table class="m-table">
+              <tr><th>因子</th><th>类别</th><th>评分</th><th>评价</th><th>含义</th></tr>
+              <tr><td style="font-weight:500">均线交叉</td><td><span class="tag tag-tech">技术面</span></td><td style="color:#3b82f6;font-weight:600">68</td><td style="color:#3b82f6">较强</td><td style="color:rgba(255,255,255,0.4)">短期上穿长期均线</td></tr>
+              <tr><td style="font-weight:500">MACD动量</td><td><span class="tag tag-tech">技术面</span></td><td style="color:#22c55e;font-weight:600">82</td><td style="color:#22c55e">很强</td><td style="color:rgba(255,255,255,0.4)">上涨动能较强</td></tr>
+              <tr><td style="font-weight:500">盈利能力</td><td><span class="tag tag-fund">基本面</span></td><td style="color:#22c55e;font-weight:600">91</td><td style="color:#22c55e">很强</td><td style="color:rgba(255,255,255,0.4)">赚钱能力很强</td></tr>
+              <tr><td style="font-weight:500">资金流向</td><td><span class="tag tag-sent">情绪面</span></td><td style="color:#f59e0b;font-weight:600">48</td><td style="color:#f59e0b">一般</td><td style="color:rgba(255,255,255,0.4)">主力资金关注度一般</td></tr>
+              <tr><td style="font-weight:500">换手率</td><td><span class="tag tag-sent">情绪面</span></td><td style="color:#f59e0b;font-weight:600">55</td><td style="color:#f59e0b">一般</td><td style="color:rgba(255,255,255,0.4)">交易活跃度适中</td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. 圆环仪表 + 表格</h3>
+      <p>顶部三个大圆环显示维度得分，下方是详细的因子表格。更像"体检报告"风格，数据展示完整。</p>
+    </div>
+  </div>
+</div>

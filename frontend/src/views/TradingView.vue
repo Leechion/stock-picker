@@ -66,6 +66,7 @@
         <div class="section-header">
           <span class="panel-title">当前持仓</span>
           <span class="font-mono position-count">{{ positions.length }} / 10</span>
+          <el-button size="small" style="margin-left: auto" @click="exportPositions">导出 CSV</el-button>
         </div>
       </template>
       <el-table :data="positions" border stripe style="width: 100%">
@@ -98,7 +99,15 @@
             </span>
           </template>
         </el-table-column>
-        <el-table-column prop="pnl_pct" label="盈亏%" align="right" width="90">
+        <el-table-column prop="change_pct" label="今日涨跌" align="right" width="95">
+          <template #default="{ row }">
+            <span v-if="row.change_pct != null" class="font-mono" :class="row.change_pct >= 0 ? 'text-up' : 'text-down'">
+              {{ row.change_pct >= 0 ? '+' : '' }}{{ row.change_pct?.toFixed(2) }}%
+            </span>
+            <span v-else class="font-mono">--</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="pnl_pct" label="持仓盈亏" align="right" width="95">
           <template #default="{ row }">
             <span class="font-mono" :class="row.pnl_pct >= 0 ? 'text-up' : 'text-down'">
               {{ row.pnl_pct >= 0 ? '+' : '' }}{{ row.pnl_pct?.toFixed(2) }}%
@@ -123,7 +132,12 @@
 
     <!-- Trade Logs Table -->
     <el-card shadow="never" class="section-card">
-      <template #header><span class="panel-title">交易日志</span></template>
+      <template #header>
+        <div class="section-header">
+          <span class="panel-title">交易日志</span>
+          <el-button size="small" style="margin-left: auto" @click="exportLogs">导出 CSV</el-button>
+        </div>
+      </template>
       <el-table :data="tradeLogs" border stripe style="width: 100%" v-loading="logsLoading">
         <el-table-column prop="created_at" label="时间" width="170">
           <template #default="{ row }">
@@ -183,7 +197,7 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   getTradingAccount,
@@ -193,20 +207,23 @@ import {
   stopTradingBot,
   resetTradingAccount,
 } from '@/api/trading'
-import { monitorWs } from '@/utils/websocket'
 import { useMonitorStore } from '@/store'
+import { monitorWs } from '@/utils/websocket'
+import { exportToCSV } from '@/utils/export'
 
 const monitor = useMonitorStore()
+
+// Reactive references for template use
+const account = computed(() => monitor.account)
+const positions = computed(() => monitor.positions)
 
 const actionLoading = ref(false)
 const logsLoading = ref(false)
 const logsPage = ref(1)
 const logsTotal = ref(0)
-
-// Use store state for reactive account/positions
-const account = monitor.account
-const positions = monitor.positions
 const tradeLogs = ref<Record<string, unknown>[]>([])
+
+let _pollTimer: ReturnType<typeof setInterval> | null = null
 
 function formatMoney(val: number): string {
   if (val == null) return '--'
@@ -228,6 +245,57 @@ function actionTagType(action: string): string {
   return map[action] || ''
 }
 
+function exportPositions() {
+  const data = positions.value
+  if (!data.length) return
+  exportToCSV(
+    ['代码', '名称', '持仓数', '成本价', '现价', '市值', '盈亏', '盈亏率', '止损价', '层数'],
+    data.map((p) => [
+      String(p.code), String(p.name), Number(p.shares),
+      Number(p.avg_cost).toFixed(2),
+      Number(p.current_price).toFixed(2),
+      Number(p.market_value).toFixed(2),
+      Number(p.pnl).toFixed(2),
+      Number(p.pnl_pct).toFixed(2) + '%',
+      Number(p.stop_loss_price).toFixed(2),
+      `${p.tier}/3`,
+    ]),
+    `持仓_${new Date().toISOString().slice(0, 10)}.csv`,
+  )
+}
+
+function exportLogs() {
+  const data = tradeLogs.value
+  if (!data.length) return
+  const labelMap: Record<string, string> = { buy: '买入', sell: '卖出', stop_loss: '止损', take_profit: '止盈' }
+  exportToCSV(
+    ['时间', '操作', '代码', '名称', '价格', '数量', '金额', '盈亏', '原因'],
+    data.map((l) => [
+      String(l.created_at).replace('T', ' ').substring(0, 19),
+      labelMap[String(l.action)] || String(l.action),
+      String(l.code), String(l.name),
+      Number(l.price).toFixed(2),
+      Number(l.shares),
+      Number(l.amount).toFixed(2),
+      l.pnl != null ? Number(l.pnl).toFixed(2) : '',
+      String(l.reason),
+    ]),
+    `交易日志_${new Date().toISOString().slice(0, 10)}.csv`,
+  )
+}
+
+function poll() {
+  getTradingAccount().then(res => {
+    const data = (res as any).data ?? res
+    monitor.updateAccount(data)
+  }).catch(() => {})
+  getTradingPositions().then(res => {
+    const data = (res as any).data ?? res
+    const arr = Array.isArray(data) ? data : []
+    monitor.updatePositions(arr)
+  }).catch(() => {})
+}
+
 async function loadLogs() {
   logsLoading.value = true
   try {
@@ -238,20 +306,6 @@ async function loadLogs() {
   finally { logsLoading.value = false }
 }
 
-function handleWsTrade(data: unknown) {
-  const trade = data as Record<string, unknown>
-  monitor.addTrade(trade)
-  loadLogs()
-}
-
-function handlePositions(data: unknown) {
-  monitor.updatePositions(data as Record<string, unknown>[])
-}
-
-function handleAccount(data: unknown) {
-  monitor.updateAccount(data as Record<string, unknown>)
-}
-
 async function handleStart() {
   actionLoading.value = true
   try {
@@ -259,6 +313,7 @@ async function handleStart() {
     ElMessage.success('交易机器人已启动')
     await loadInitialData()
     loadLogs()
+    startPolling()
   } catch { ElMessage.error('启动失败') }
   finally { actionLoading.value = false }
 }
@@ -270,6 +325,7 @@ async function handleStop() {
     ElMessage.success('交易机器人已停止')
     await loadInitialData()
     loadLogs()
+    stopPolling()
   } catch { ElMessage.error('停止失败') }
   finally { actionLoading.value = false }
 }
@@ -289,6 +345,7 @@ async function handleReset() {
     ElMessage.success('账户已重置')
     await loadInitialData()
     loadLogs()
+    stopPolling()
   } catch { ElMessage.error('重置失败') }
   finally { actionLoading.value = false }
 }
@@ -299,12 +356,8 @@ async function loadInitialData() {
       getTradingAccount(),
       getTradingPositions(),
     ])
-    console.log('[TradingView] accountRes:', accountRes)
-    console.log('[TradingView] positionsRes:', positionsRes)
-    const accountData = accountRes.data ?? accountRes
-    const positionsData = positionsRes.data ?? positionsRes
-    console.log('[TradingView] accountData:', accountData)
-    console.log('[TradingView] positionsData type:', typeof positionsData, 'length:', Array.isArray(positionsData) ? positionsData.length : 'N/A')
+    const accountData = (accountRes as any).data ?? accountRes
+    const positionsData = (positionsRes as any).data ?? positionsRes
     monitor.updateAccount(accountData)
     monitor.updatePositions(Array.isArray(positionsData) ? positionsData : [])
   } catch (e) {
@@ -312,24 +365,45 @@ async function loadInitialData() {
   }
 }
 
-onMounted(() => {
+function startPolling() {
+  if (_pollTimer) return
+  poll()
+  _pollTimer = setInterval(poll, 3000)
+}
+
+function stopPolling() {
+  if (_pollTimer) {
+    clearInterval(_pollTimer)
+    _pollTimer = null
+  }
+}
+
+onMounted(async () => {
+  await loadInitialData()
+  loadLogs()
+
+  // Connect WebSocket for real-time updates
   monitorWs.on('open', () => monitor.setWsConnected(true))
   monitorWs.on('close', () => monitor.setWsConnected(false))
-  monitorWs.on('positions', handlePositions)
-  monitorWs.on('account', handleAccount)
-  monitorWs.on('trades', handleWsTrade)
+  monitorWs.on('positions', (data) => {
+    monitor.updatePositions(Array.isArray(data) ? data as Record<string, unknown>[] : [])
+  })
+  monitorWs.on('account', (data) => {
+    if (data && typeof data === 'object') monitor.updateAccount(data as Record<string, unknown>)
+  })
+  monitorWs.subscribe(['positions', 'account'])
   monitorWs.connect()
-  monitorWs.subscribe(['positions', 'account', 'trades'])
 
-  loadInitialData()
-  loadLogs()
+  // Only poll when trading is active
+  if ((monitor.account as any).is_active) {
+    startPolling()
+  }
 })
 
 onBeforeUnmount(() => {
-  monitorWs.off('positions', handlePositions)
-  monitorWs.off('account', handleAccount)
-  monitorWs.off('trades', handleWsTrade)
-  monitorWs.unsubscribe(['positions', 'account', 'trades'])
+  monitorWs.disconnect()
+  monitor.setWsConnected(false)
+  stopPolling()
 })
 </script>
 

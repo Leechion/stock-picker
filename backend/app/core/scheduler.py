@@ -27,10 +27,12 @@ async def run_daily_ranking() -> None:
     logger.info("Starting daily ranking computation")
     async with AsyncSessionLocal() as session:
         try:
-            # Step 1: Load all stock codes
+            # Step 1: Load all stock codes (exclude ST and price > 100)
             from sqlalchemy import select
-            result = await session.execute(select(StockInfo.code))
-            codes = list(result.scalars().all())
+            from app.services.ranking_service import get_eligible_codes
+            eligible = await get_eligible_codes(session)
+            codes = sorted(eligible)
+            logger.info(f"Eligible stocks for ranking: {len(codes)} (excluded ST & price>100)")
 
             # Step 2: Compute factors for each stock (concurrent)
             import asyncio
@@ -105,11 +107,14 @@ async def run_daily_ranking() -> None:
                     })
                 computed += 1
 
-            # Delete old factors and batch insert new
-            await session.execute(sql_delete(FactorValue))
-            for i in range(0, len(all_records), 500):
-                await session.execute(insert(FactorValue), all_records[i:i + 500])
-            await session.commit()
+            # Delete old factors and batch insert new (only if we have new data)
+            if all_records:
+                await session.execute(sql_delete(FactorValue))
+                for i in range(0, len(all_records), 500):
+                    await session.execute(insert(FactorValue), all_records[i:i + 500])
+                await session.commit()
+            else:
+                logger.warning("No factor records computed, skipping delete/insert")
 
             logger.info(f"Factors computed: {computed}/{len(codes)} stocks")
 
@@ -117,6 +122,19 @@ async def run_daily_ranking() -> None:
             from app.services.ranking_service import compute_all_rankings
             ranking_result = await compute_all_rankings(session, date.today())
             logger.info(f"Daily ranking: {ranking_result.get('stocks_computed', 0)} stocks ranked")
+
+            # Step 4: Check alert rules
+            from app.services.alert_service import check_alerts, format_alert_message
+            triggers = await check_alerts(session)
+            if triggers:
+                logger.info(f"Alert triggers: {len(triggers)}")
+                message = format_alert_message(triggers)
+                if message:
+                    from app.services.notification_service import send_wechat_work
+                    from app.core.config import settings
+                    send_wechat_work(settings.wechat_webhook_url, message)
+            else:
+                logger.info("No alert triggers")
 
         except Exception as e:
             await session.rollback()
@@ -170,11 +188,13 @@ async def run_refresh_live_prices() -> None:
     async with AsyncSessionLocal() as session:
         try:
             import asyncio
-            from app.services.trading_service import get_or_create_account, refresh_live_prices
+            from app.services.trading_service import get_account, refresh_live_prices
             from app.models.trading import Position
             from sqlalchemy import select
 
-            account = await get_or_create_account(session)
+            account = await get_account(session)
+            if account is None:
+                return
             stmt = select(Position.code).where(Position.account_id == account.id)
             result = await session.execute(stmt)
             codes = list(result.scalars().all())
@@ -192,10 +212,13 @@ async def run_daily_summary() -> None:
         try:
             import asyncio
             from sqlalchemy import select
-            from app.services.trading_service import get_or_create_account, refresh_live_prices
+            from app.services.trading_service import get_account, refresh_live_prices
             from app.models.trading import Position
 
-            account = await get_or_create_account(session)
+            account = await get_account(session)
+            if account is None:
+                logger.info("No trading account, skipping daily summary")
+                return
             stmt = select(Position).where(Position.account_id == account.id)
             result = await session.execute(stmt)
             positions = result.scalars().all()
@@ -294,7 +317,7 @@ def register_scheduler() -> None:
         run_daily_ranking,
         trigger="cron",
         hour=15,
-        minute=10,
+        minute=25,
         day_of_week="mon-fri",
         id="daily_ranking",
         name="Daily stock ranking compute",
@@ -304,7 +327,7 @@ def register_scheduler() -> None:
         run_daily_notification,
         trigger="cron",
         hour=15,
-        minute=12,
+        minute=27,
         day_of_week="mon-fri",
         id="daily_notification",
         name="Daily ranking notification push",
@@ -366,7 +389,7 @@ def register_scheduler() -> None:
         run_daily_summary,
         trigger="cron",
         hour=15,
-        minute=2,
+        minute=30,
         day_of_week="mon-fri",
         id="trading_daily_summary",
         name="Daily trading summary to WeChat",

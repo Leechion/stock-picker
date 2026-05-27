@@ -77,6 +77,7 @@
             <el-option v-for="ind in industryList" :key="ind" :label="ind" :value="ind" />
           </el-select>
           <el-input v-model="searchQuery" placeholder="搜索代码或名称" :prefix-icon="Search" clearable size="small" style="width: 180px" />
+          <el-button size="small" @click="exportCSV">导出 CSV</el-button>
         </div>
       </div>
       <StockTable
@@ -98,6 +99,7 @@ import { Refresh, Search, DataLine, Clock, Trophy, TrendCharts, List } from '@el
 import { useStocksStore } from '@/store'
 import { getRankings } from '@/api/ranking'
 import { getActiveStrategy } from '@/api/strategy'
+import { exportToCSV } from '@/utils/export'
 import StockTable from '@/components/StockTable.vue'
 import type { PaginatedData, RankingItem } from '@/types'
 
@@ -167,6 +169,22 @@ async function refreshData() {
   loading.value = true
   try { await loadRankings() }
   finally { loading.value = false }
+}
+
+function exportCSV() {
+  const data = filteredRankings.value
+  if (!data.length) return
+  exportToCSV(
+    ['排名', '代码', '名称', '行业', '综合评分', '技术面', '基本面', '情绪面'],
+    data.map((r) => [
+      r.rank, r.code, r.name || '', r.industry || '',
+      (r.score ?? 0).toFixed(2),
+      (r.tech_score ?? 0).toFixed(2),
+      (r.fund_score ?? 0).toFixed(2),
+      (r.sent_score ?? 0).toFixed(2),
+    ]),
+    `股票排名_${new Date().toISOString().slice(0, 10)}.csv`,
+  )
 }
 
 function goToDetail(code: string) { router.push(`/stocks/${code}`) }

@@ -62,6 +62,30 @@ async def run_backtest(
             "message": f"No ranking data between {start_date} and {end_date}",
         }
 
+    # Filter out recent dates that don't have enough future trading days.
+    # Get the most recent trading dates; the (hold_days+1)-th is the latest
+    # date that still has hold_days of future price data available.
+    check_stmt = (
+        select(StockDaily.trade_date)
+        .distinct()
+        .order_by(StockDaily.trade_date.desc())
+        .limit(hold_days + 1)
+    )
+    check_result = await session.execute(check_stmt)
+    available_dates = [row[0] for row in check_result.all()]
+
+    if len(available_dates) > hold_days:
+        latest_valid_date = available_dates[-1]
+        before_filter = len(ranking_dates)
+        ranking_dates = [d for d in ranking_dates if d <= latest_valid_date]
+        logger.info(f"Backtest: filtered {before_filter} → {len(ranking_dates)} ranking dates (cutoff={latest_valid_date})")
+
+    if not ranking_dates:
+        return {
+            "status": "no_data",
+            "message": f"Not enough future data for {hold_days}-day hold period. Try a shorter hold period.",
+        }
+
     period_returns: list[float] = []
     period_details: list[dict] = []
 
@@ -123,6 +147,11 @@ async def run_backtest(
     # Total return
     total_return = float((cumulative[-1] - 1) * 100)
 
+    # Enrich period details with cumulative return and drawdown
+    for i, detail in enumerate(period_details):
+        detail["cumulative_return"] = round((cumulative[i] - 1) * 100, 2)
+        detail["drawdown"] = round(float(drawdown[i]) * 100, 2)
+
     return {
         "status": "success",
         "period": {"start": str(start_date), "end": str(end_date)},
@@ -135,7 +164,7 @@ async def run_backtest(
             "max_drawdown_pct": round(max_drawdown, 2),
             "num_periods": len(period_returns),
         },
-        "periods": period_details[-10:],  # last 10 periods for inspection
+        "periods": period_details,
     }
 
 

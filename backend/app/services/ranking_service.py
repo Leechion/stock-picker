@@ -14,9 +14,33 @@ from sqlalchemy import and_, func, select
 from sqlalchemy import delete as sql_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.stock import FactorValue, StockRanking, StockInfo
+from app.models.stock import FactorValue, StockRanking, StockInfo, StockDaily
 from app.services.factor_config import CATEGORY_WEIGHTS, FACTOR_CONFIG
 from app.services.strategy_loader import strategy_loader
+
+
+async def get_eligible_codes(session: AsyncSession) -> set[str]:
+    """Return stock codes eligible for factor computation & ranking.
+
+    Excludes:
+    - ST stocks (name contains 'ST')
+    - Stocks with latest close price > 100
+    """
+    # Subquery: latest close price per stock
+    latest_date = select(StockDaily.code, func.max(StockDaily.trade_date).label("max_date")).group_by(StockDaily.code).subquery()
+    latest_price = (
+        select(StockDaily.code, StockDaily.close)
+        .join(latest_date, (StockDaily.code == latest_date.c.code) & (StockDaily.trade_date == latest_date.c.max_date))
+        .subquery()
+    )
+    stmt = (
+        select(StockInfo.code)
+        .join(latest_price, StockInfo.code == latest_price.c.code)
+        .where(~StockInfo.name.contains("ST"))
+        .where(latest_price.c.close <= 100)
+    )
+    result = await session.execute(stmt)
+    return set(result.scalars().all())
 
 
 # ======================================================================
@@ -107,6 +131,16 @@ async def compute_rankings(
         for code, f_name, f_val, f_type in rows:
             stock_factors.setdefault(code, []).append((f_name, float(f_val), f_type.value))
 
+        # Filter out ST stocks and price > 100
+        eligible = await get_eligible_codes(session)
+        excluded = set(stock_factors.keys()) - eligible
+        if excluded:
+            logger.info(f"Ranking: excluded {len(excluded)} stocks (ST / price>100)")
+            for code in excluded:
+                stock_factors.pop(code, None)
+        if not stock_factors:
+            return {"status": "empty", "date": str(trading_date), "stocks_computed": 0, "strategy": strategy_name}
+
         # 1.5 Cross-sectional Z-score standardization per factor_name
         factor_name_values: dict[str, list[float]] = {}
         for factors in stock_factors.values():
@@ -124,7 +158,7 @@ async def compute_rankings(
             std_factors = []
             for f_name, f_val, f_type in factors:
                 mean, std = factor_stats[f_name]
-                z_val = (f_val - mean) / std if std > 0 else f_val
+                z_val = (f_val - mean) / std if std > 0 else 0.0
                 std_factors.append((f_name, float(z_val), f_type))
             stock_factors_std[code] = std_factors
 
@@ -241,6 +275,16 @@ async def compute_rankings(
 
         if rankings:
             await session.execute(StockRanking.__table__.insert(), rankings)
+
+        # Clean up any remaining records for excluded stocks
+        if excluded:
+            await session.execute(
+                sql_delete(StockRanking).where(
+                    (StockRanking.rank_date == trading_date)
+                    & (StockRanking.strategy == strategy_name)
+                    & (StockRanking.code.in_(excluded))
+                )
+            )
         await session.commit()
 
         logger.info(f"Computed rankings for {len(rankings)} stocks on {trading_date} (strategy={strategy_name})")
@@ -508,3 +552,89 @@ async def get_sector_stocks(
         })
 
     return records, total
+
+
+async def get_ranking_history(
+    session: AsyncSession,
+    code: str,
+    days: int = 30,
+    strategy: str | None = None,
+) -> list[dict]:
+    """Return ranking history for a stock over the last N days."""
+    from datetime import timedelta
+
+    start_date = date.today() - timedelta(days=days)
+    stmt = (
+        select(StockRanking)
+        .where(StockRanking.code == code, StockRanking.rank_date >= start_date)
+        .order_by(StockRanking.rank_date)
+    )
+    if strategy:
+        stmt = stmt.where(StockRanking.strategy == strategy)
+
+    result = await session.execute(stmt)
+    rows = result.scalars().all()
+    return [
+        {
+            "rank_date": str(r.rank_date),
+            "rank_position": r.rank_position,
+            "total_score": round(r.total_score, 2),
+            "tech_score": round(float(r.tech_score), 2),
+            "fund_score": round(float(r.fund_score), 2),
+            "sent_score": round(float(r.sent_score), 2),
+            "industry_rank": r.industry_rank,
+        }
+        for r in rows
+    ]
+
+
+async def get_peer_stocks(
+    session: AsyncSession,
+    code: str,
+    strategy: str | None = None,
+) -> list[dict]:
+    """Return same-industry peers ranked by score."""
+    # Find the stock's industry
+    info_stmt = select(StockInfo.industry).where(StockInfo.code == code)
+    info_result = await session.execute(info_stmt)
+    industry = info_result.scalar_one_or_none()
+    if not industry:
+        return []
+
+    # Find latest ranking date
+    date_stmt = select(func.max(StockRanking.rank_date))
+    if strategy:
+        date_stmt = date_stmt.where(StockRanking.strategy == strategy)
+    date_result = await session.execute(date_stmt)
+    latest_date = date_result.scalar_one_or_none()
+    if not latest_date:
+        return []
+
+    # Get peers in the same industry
+    base = select(StockRanking).where(
+        StockRanking.rank_date == latest_date,
+        StockRanking.industry == industry,
+    )
+    if strategy:
+        base = base.where(StockRanking.strategy == strategy)
+
+    stmt = base.order_by(StockRanking.total_score.desc()).limit(15)
+    result = await session.execute(stmt)
+    peers = result.scalars().all()
+
+    codes = [p.code for p in peers]
+    name_stmt = select(StockInfo.code, StockInfo.name).where(StockInfo.code.in_(codes))
+    name_result = await session.execute(name_stmt)
+    name_map = {row[0]: row[1] for row in name_result.all()}
+
+    return [
+        {
+            "code": p.code,
+            "name": name_map.get(p.code, ""),
+            "total_score": round(p.total_score, 2),
+            "rank_position": p.rank_position,
+            "industry_rank": p.industry_rank,
+            "is_self": p.code == code,
+        }
+        for p in peers
+    ]

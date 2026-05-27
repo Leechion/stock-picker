@@ -4,8 +4,9 @@
       <div class="page-title-group">
         <h2 class="page-title">系统设置</h2>
         <span class="page-subtitle">策略参数配置 · 回测规则管理</span>
-      </div>
-    </div>
+</div>
+          <el-alert v-if="syncResult" :title="syncResult.message" type="success" show-icon :closable="false" />
+        </div>
 
     <div class="settings-grid">
       <!-- API Config -->
@@ -34,10 +35,31 @@
             <span class="sync-label">股票数量</span>
             <span class="sync-value font-mono">{{ stockCount ?? '--' }} 只</span>
           </div>
-          <el-button type="primary" :icon="Refresh" :loading="syncing" @click="handleSync" size="large">
-            同步全部股票数据
-          </el-button>
-          <el-alert v-if="syncResult" :title="syncResult.message" type="success" show-icon :closable="false" />
+          <div class="sync-hint">
+            数据源：THS → Sina → 东方财富（自动降级） · 仅沪深主板（00/60） · 增量同步（跳过今日已更新）
+          </div>
+          <div v-if="syncProgress" class="sync-progress-wrap">
+            <el-progress
+              :percentage="syncProgress.total > 0 ? Math.round(syncProgress.done / syncProgress.total * 100) : 0"
+              :status="syncProgress.status === 'complete' ? 'success' : syncProgress.status === 'cancelled' ? 'exception' : undefined"
+              :stroke-width="16"
+              :text-inside="true"
+            />
+            <span class="sync-progress-text">
+              {{ syncProgress.status === 'complete' ? '同步完成！' :
+                 syncProgress.status === 'cancelled' ? '已取消' :
+                 syncProgress.status === 'saving' ? '正在保存...' :
+                 `同步中 ${syncProgress.done} / ${syncProgress.total}` }}
+            </span>
+          </div>
+          <div class="sync-buttons">
+            <el-button v-if="!syncing" type="primary" :icon="Refresh" @click="handleSync" size="large">
+              同步全部股票数据
+            </el-button>
+            <el-button v-else type="danger" :icon="Close" :loading="cancelling" @click="handleCancelSync" size="large">
+              取消同步
+            </el-button>
+          </div>
         </div>
       </el-card>
 
@@ -83,6 +105,13 @@
         <el-alert v-if="strategyResult" :title="strategyResult" type="success" show-icon :closable="false" style="margin-top: 12px" />
       </el-card>
 
+      <!-- Smart Alerts -->
+      <el-card shadow="never" class="alerts-card">
+        <template #header><span class="card-title">智能预警</span></template>
+        <p class="card-desc">自定义预警规则，每日排名后自动检查并推送通知。</p>
+        <el-button type="primary" @click="router.push('/alerts')">管理预警规则</el-button>
+      </el-card>
+
       <!-- System Info -->
       <el-card shadow="never">
         <template #header><span class="card-title">系统信息</span></template>
@@ -99,17 +128,23 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, onMounted } from 'vue'
-import { Refresh, Cpu, Connection } from '@element-plus/icons-vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { useRouter } from 'vue-router'
+import { Refresh, Cpu, Connection, Close } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { getStocks, syncAll, syncIndustry } from '@/api/stocks'
 import { computeFactors } from '@/api/factors'
 import { getStrategies, activateStrategy } from '@/api/strategy'
+import { monitorWs } from '@/utils/websocket'
+import client from '@/api/client'
+
+const router = useRouter()
 
 const apiUrl = ref('http://localhost:8000/api')
 const timeout = ref(30000)
 const saving = ref(false)
 const syncing = ref(false)
+const cancelling = ref(false)
 const computing = ref(false)
 const syncingIndustry = ref(false)
 
@@ -117,6 +152,7 @@ const stockCount = ref<number | null>(null)
 const syncResult = ref<{ message: string } | null>(null)
 const computeResult = ref<{ stocks_computed: number; updated_at: string } | null>(null)
 const industryResult = ref<string | null>(null)
+const syncProgress = ref<{ done: number; total: number; status: string } | null>(null)
 
 const strategies = ref<Array<{ slug: string; name: string; description: string; active: boolean }>>([])
 const strategiesLoading = ref(false)
@@ -141,16 +177,45 @@ function handleReset() {
   ElMessage.info('已恢复默认')
 }
 
+function handleSyncProgress(data: unknown) {
+  const d = data as { done: number; total: number; status: string }
+  syncProgress.value = d
+  if (d.status === 'complete') {
+    syncing.value = false
+    syncResult.value = { message: `同步完成，共 ${d.done} 只` }
+  } else if (d.status === 'cancelled') {
+    syncing.value = false
+    ElMessage.warning('同步已取消')
+  }
+  // 'saving' and 'syncing' — just show progress
+}
+
 async function handleSync() {
   syncing.value = true
   syncResult.value = null
+  syncProgress.value = null
+  // Fire-and-forget: sync takes minutes, rely on WebSocket for progress
+  syncAll().catch(() => {
+    // Only mark failed if no progress received within 10s
+    setTimeout(() => {
+      if (syncing.value && !syncProgress.value) {
+        syncing.value = false
+        ElMessage.error('同步失败')
+      }
+    }, 10000)
+  })
+}
+
+async function handleCancelSync() {
+  cancelling.value = true
   try {
-    const { data } = await syncAll()
-    syncResult.value = { message: data.message || '同步完成' }
-    stockCount.value = data.stock_count || 0
-    ElMessage.success('同步完成')
-  } catch { ElMessage.error('同步失败') }
-  finally { syncing.value = false }
+    await client.post('/stocks/sync-cancel')
+    ElMessage.info('已发送取消请求')
+  } catch {
+    ElMessage.error('取消失败')
+  } finally {
+    cancelling.value = false
+  }
 }
 
 async function handleCompute() {
@@ -208,6 +273,14 @@ onMounted(() => {
   if (savedTimeout) timeout.value = Number(savedTimeout)
   loadStockCount()
   loadStrategies()
+  monitorWs.on('sync_progress', handleSyncProgress)
+  monitorWs.connect()
+  monitorWs.subscribe(['sync_progress'])
+})
+
+onBeforeUnmount(() => {
+  monitorWs.off('sync_progress', handleSyncProgress)
+  monitorWs.unsubscribe(['sync_progress'])
 })
 </script>
 
@@ -285,6 +358,18 @@ onMounted(() => {
   border-radius: 6px;
 }
 
+.sync-days {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sync-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 6px 0;
+}
+
 .sync-label {
   font-size: 13px;
   color: var(--text-secondary);
@@ -344,5 +429,10 @@ onMounted(() => {
 .strategy-desc {
   font-size: 12px;
   color: var(--text-muted);
+}
+
+/* Alerts */
+.alerts-card {
+  grid-column: span 2;
 }
 </style>

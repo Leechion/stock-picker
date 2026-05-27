@@ -22,7 +22,10 @@ factors:
     profit_growth_score: { weight: 0.10 }
     debt_ratio_score: { weight: 0.05 }
   sentiment:
-    turnover_score: { weight: 0.20 }
-    capital_flow_score: { weight: 0.30 }
-    momentum_5d_score: { weight: 0.25 }
-    momentum_20d_score: { weight: 0.25 }
+    turnover_score: { weight: 0.10 }
+    capital_flow_score: { weight: 0.15 }
+    real_capital_flow_score: { weight: 0.15 }
+    chip_concentration_score: { weight: 0.10 }
+    sector_heat_score: { weight: 0.20 }
+    momentum_5d_score: { weight: 0.15 }
+    momentum_20d_score: { weight: 0.15 }

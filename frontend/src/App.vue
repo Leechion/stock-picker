@@ -66,6 +66,14 @@
                 <el-icon><TrendCharts /></el-icon>
                 <template #title>模拟交易</template>
               </el-menu-item>
+              <el-menu-item index="/backtest">
+                <el-icon><DataLine /></el-icon>
+                <template #title>策略回测</template>
+              </el-menu-item>
+              <el-menu-item index="/alerts">
+                <el-icon><Bell /></el-icon>
+                <template #title>智能预警</template>
+              </el-menu-item>
               <el-menu-item index="/settings">
                 <el-icon><Setting /></el-icon>
                 <template #title>系统设置</template>
@@ -101,6 +109,8 @@ import {
   Odometer,
   Setting,
   TrendCharts,
+  DataLine,
+  Bell,
 } from '@element-plus/icons-vue'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 

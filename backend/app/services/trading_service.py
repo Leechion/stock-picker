@@ -66,6 +66,12 @@ async def get_or_create_account(session: AsyncSession) -> TradingAccount:
     return account
 
 
+async def get_account(session: AsyncSession) -> TradingAccount | None:
+    """Read-only: get existing account without creating one."""
+    result = await session.execute(select(TradingAccount).limit(1))
+    return result.scalar_one_or_none()
+
+
 # ======================================================================
 # ATR computation
 # ======================================================================
@@ -142,22 +148,20 @@ async def execute_buy(
     price: float,
     atr: float,
 ) -> TradeLog | None:
-    """Execute a simulated buy order with pyramid sizing."""
+    """Execute a simulated buy order with pyramid sizing. Falls back to minimum 100 shares for small accounts."""
     weight = pyramid_weight(rank)
     amount = account.initial_capital * weight
     shares = int(amount / price / 100) * 100  # A股整手
 
+    # Fallback: if pyramid amount can't buy 100 shares, try cash-basis minimum
     if shares < 100:
-        logger.warning(f"Not enough capital to buy {code}: need {amount:.0f}, shares={shares}")
+        shares = int(account.cash / price / 100) * 100
+
+    if shares < 100:
+        logger.warning(f"Not enough capital to buy {code}: price={price:.2f} cash={account.cash:.0f}")
         return None
 
     total_cost = shares * price
-    if total_cost > account.cash:
-        shares = int(account.cash / price / 100) * 100
-        if shares < 100:
-            logger.warning(f"Insufficient cash for {code}: cash={account.cash:.0f}")
-            return None
-        total_cost = shares * price
 
     stop_loss = round(price - 2 * atr, 2)
 
@@ -204,7 +208,7 @@ async def execute_sell(
     shares: int | None = None,
 ) -> TradeLog:
     """Execute a simulated sell order (full or partial)."""
-    sell_shares = shares or position.shares
+    sell_shares = shares if shares is not None else position.shares
     sell_shares = min(sell_shares, position.shares)
 
     amount = sell_shares * price
@@ -270,9 +274,11 @@ async def check_and_execute_pyramid_add(
     position.shares = new_total_shares
     position.tier += 1
 
-    # Recalculate stop loss based on new avg cost
+    # Recalculate stop loss based on new avg cost (only move up, never down)
     atr = position.atr_at_buy
-    position.stop_loss_price = round(position.avg_cost - 2 * atr, 2)
+    old_stop = position.stop_loss_price
+    new_stop = round(position.avg_cost - 2 * atr, 2)
+    position.stop_loss_price = max(old_stop, new_stop)
 
     account.cash -= total_cost
 
@@ -339,26 +345,26 @@ async def check_take_profit(
         result = await session.execute(stmt)
         return (result.scalar_one_or_none() or 0) > 0
 
-    # +30% take profit (check first since it's higher)
-    if gain_pct >= 0.30 and not await _already_sold_at("+30%"):
-        sell_shares = max(100, int(position.shares / 3 / 100) * 100)
-        if sell_shares > 0 and sell_shares <= position.shares:
+    # +15% take profit (independent — fires even if +30% also triggers)
+    if gain_pct >= 0.15 and not await _already_sold_at("+15%"):
+        sell_shares = min(position.shares, max(100, int(position.shares / 3 / 100) * 100))
+        if sell_shares > 0:
             log = await execute_sell(
                 session, account, position, current_price,
-                reason="固定止盈+30% 卖出1/3",
+                reason="固定止盈+15% 卖出1/3",
                 action="take_profit",
                 shares=sell_shares,
             )
             if log:
                 logs.append(log)
 
-    # +15% take profit
-    elif gain_pct >= 0.15 and not await _already_sold_at("+15%"):
-        sell_shares = max(100, int(position.shares / 3 / 100) * 100)
-        if sell_shares > 0 and sell_shares <= position.shares:
+    # +30% take profit (independent from +15%)
+    if gain_pct >= 0.30 and not await _already_sold_at("+30%"):
+        sell_shares = min(position.shares, max(100, int(position.shares / 3 / 100) * 100))
+        if sell_shares > 0:
             log = await execute_sell(
                 session, account, position, current_price,
-                reason="固定止盈+15% 卖出1/3",
+                reason="固定止盈+30% 卖出1/3",
                 action="take_profit",
                 shares=sell_shares,
             )
@@ -485,9 +491,16 @@ async def get_positions_with_prices(session: AsyncSession, account_id: int) -> l
         live_prices = await loop.run_in_executor(None, refresh_live_prices, missing)
         price_map.update(live_prices)
 
+    # Fetch live quotes (price + change_pct) for all positions
+    import asyncio as _asyncio
+    loop = _asyncio.get_running_loop()
+    quotes = await loop.run_in_executor(None, fetch_live_quotes, codes)
+
     records = []
     for pos in positions:
-        current_price = price_map.get(pos.code) or await get_latest_price(session, pos.code) or pos.avg_cost
+        quote = quotes.get(pos.code, {})
+        current_price = price_map.get(pos.code) or quote.get("price") or await get_latest_price(session, pos.code) or pos.avg_cost
+        change_pct = quote.get("change_pct")
         pnl = (current_price - pos.avg_cost) * pos.shares
         pnl_pct = (current_price / pos.avg_cost - 1) * 100 if pos.avg_cost > 0 else 0
 
@@ -497,6 +510,7 @@ async def get_positions_with_prices(session: AsyncSession, account_id: int) -> l
             "shares": pos.shares,
             "avg_cost": round(pos.avg_cost, 2),
             "current_price": round(current_price, 2),
+            "change_pct": round(change_pct, 2) if change_pct is not None else None,
             "market_value": round(current_price * pos.shares, 2),
             "pnl": round(pnl, 2),
             "pnl_pct": round(pnl_pct, 2),
@@ -546,6 +560,38 @@ def refresh_live_prices(codes: list[str]) -> dict[str, float]:
         pass
 
     return prices
+
+
+def fetch_live_quotes(codes: list[str]) -> dict[str, dict]:
+    """Fetch live price + change_pct from Tencent. Returns {code: {price, change_pct}}."""
+    import requests as req
+
+    prefixed = []
+    for code in codes:
+        prefix = "sh" if code.startswith(("5", "6", "9")) else "sz"
+        prefixed.append(f"{prefix}{code}")
+
+    result = {}
+    try:
+        url = f"http://qt.gtimg.cn/q={','.join(prefixed)}"
+        r = req.get(url, timeout=5)
+        text = r.content.decode("gbk", errors="replace")
+        for line in text.strip().split(";"):
+            line = line.strip()
+            if not line or "=" not in line:
+                continue
+            fields = line.split("~")
+            if len(fields) > 32:
+                code = fields[2]
+                price = float(fields[3]) if fields[3] else 0
+                change_pct = float(fields[32]) if fields[32] else 0
+                prev_close = float(fields[4]) if fields[4] else 0
+                if code and price > 0:
+                    result[code] = {"price": price, "change_pct": change_pct, "prev_close": prev_close}
+    except Exception:
+        pass
+
+    return result
 
 
 # ======================================================================
@@ -598,7 +644,7 @@ async def get_trade_logs(
 # ======================================================================
 
 async def pre_market_check(session: AsyncSession) -> list[dict]:
-    """Run before market open: check rankings, plan buys/sells."""
+    """Sector-top strategy: buy the #1 stock from the #1 sector (by avg ranking score). If unaffordable, try next."""
     actions = []
 
     account = await get_or_create_account(session)
@@ -608,77 +654,116 @@ async def pre_market_check(session: AsyncSession) -> list[dict]:
     today = date.today()
     strategy = strategy_loader.active_name
 
-    # Get today's rankings, fallback to most recent available date
-    from app.services.ranking_service import get_ranking_list
-    records, _ = await get_ranking_list(session, today, page=1, page_size=20, strategy=strategy)
+    # Find the latest ranking date
+    latest_date_stmt = (
+        select(func.max(StockRanking.rank_date))
+        .where(StockRanking.strategy == strategy)
+    )
+    latest_date = (await session.execute(latest_date_stmt)).scalar_one_or_none()
+    if not latest_date:
+        logger.warning("No ranking data available")
+        return actions
 
-    if not records:
-        # Fallback: use most recent ranking date
-        latest_date_stmt = (
-            select(func.max(StockRanking.rank_date))
-            .where(StockRanking.strategy == strategy)
+    # Get all rankings for latest date, group by industry, find best sector
+    stmt = (
+        select(StockRanking)
+        .where(
+            StockRanking.rank_date == latest_date,
+            StockRanking.strategy == strategy,
+            StockRanking.industry.isnot(None),
+            StockRanking.industry != "",
         )
-        latest_date = (await session.execute(latest_date_stmt)).scalar_one_or_none()
-        if latest_date:
-            logger.info(f"No rankings for {today}, falling back to {latest_date}")
-            records, _ = await get_ranking_list(session, latest_date, page=1, page_size=20, strategy=strategy)
+        .order_by(StockRanking.rank_position)
+    )
+    result = await session.execute(stmt)
+    all_rankings = result.scalars().all()
 
-    if not records:
+    if not all_rankings:
         logger.warning("No rankings available for trading")
         return actions
+
+    # Group by industry, compute avg score per sector
+    from collections import defaultdict
+    sector_scores: dict[str, list[float]] = defaultdict(list)
+    for r in all_rankings:
+        if r.industry:
+            sector_scores[r.industry].append(r.total_score)
+
+    # Sort sectors by average score of top 5 stocks
+    sector_avg = {}
+    for ind, scores in sector_scores.items():
+        top_scores = sorted(scores, reverse=True)[:5]
+        sector_avg[ind] = sum(top_scores) / len(top_scores)
+
+    sorted_sectors = sorted(sector_avg.items(), key=lambda x: x[1], reverse=True)
 
     # Get current positions
     stmt = select(Position).where(Position.account_id == account.id)
     result = await session.execute(stmt)
     existing = {p.code: p for p in result.scalars().all()}
 
-    # Daily: sell positions not in current top 10
-    top10_codes = {r["code"] for r in records[:10]}
+    # Find the best affordable sector #1 stock
+    target_code = None
+    target_name = None
+    target_price = None
+    target_rank = None
+    target_sector = None
+
+    for industry, _ in sorted_sectors:
+        # Get #1 stock in this industry
+        sector_stocks = [r for r in all_rankings if r.industry == industry]
+        sector_stocks.sort(key=lambda r: r.rank_position)
+
+        for r in sector_stocks:
+            # Get name
+            name_stmt = select(StockInfo.name).where(StockInfo.code == r.code)
+            nr = await session.execute(name_stmt)
+            name = nr.scalar_one_or_none() or r.code
+
+            if "ST" in name.upper():
+                continue
+
+            price = await get_latest_price(session, r.code)
+            if not price or price <= 0:
+                continue
+
+            # Can we afford at least 100 shares?
+            if price * 100 <= account.cash:
+                target_code = r.code
+                target_name = name
+                target_price = price
+                target_rank = r.rank_position
+                target_sector = industry
+                break
+
+        if target_code:
+            break
+
+    if not target_code:
+        logger.info("No affordable sector-top stock found")
+        await session.commit()
+        return actions
+
+    # Sell positions that are not the target
     for code, pos in list(existing.items()):
-        if code not in top10_codes:
+        if code != target_code:
             price = await get_latest_price(session, code) or pos.avg_cost
-            log = await execute_sell(
+            await execute_sell(
                 session, account, pos, price,
-                reason=f"调仓 排名跌出前10",
+                reason=f"调仓 切换至{target_sector}#1",
             )
             del existing[code]
             actions.append({"action": "sell", "code": code, "name": pos.name, "reason": "调仓"})
 
-    # Check pyramid add conditions for existing positions
-    for code, pos in existing.items():
-        price = await get_latest_price(session, code)
-        if price:
-            await check_and_execute_pyramid_add(session, account, pos, price)
-
-    # Buy new positions: top 10 not yet held, skip ST stocks
-    for r in records[:10]:
-        if r["code"] in existing:
-            continue
-        if len(existing) + sum(1 for a in actions if a.get("action") == "buy") >= 10:
-            break
-
-        name = r.get("name", "")
-        if not name:
-            name_stmt = select(StockInfo.name).where(StockInfo.code == r["code"])
-            name_result = await session.execute(name_stmt)
-            name = name_result.scalar_one_or_none() or r["code"]
-        if "ST" in name.upper():
-            logger.info(f"Skipping ST stock {r['code']} {name}")
-            continue
-
-        price = await get_latest_price(session, r["code"])
-        if not price or price <= 0:
-            continue
-
-        atr = await compute_atr(session, r["code"])
-        if not atr:
-            continue
-
-        log = await execute_buy(
-            session, account, r["code"], name, r["rank"], price, atr,
-        )
-        if log:
-            actions.append({"action": "buy", "code": r["code"], "name": name, "rank": r["rank"]})
+    # Buy target if not already held
+    if target_code not in existing:
+        atr = await compute_atr(session, target_code)
+        if atr:
+            log = await execute_buy(
+                session, account, target_code, target_name, target_rank, target_price, atr,
+            )
+            if log:
+                actions.append({"action": "buy", "code": target_code, "name": target_name, "rank": target_rank})
 
     await session.commit()
     return actions
@@ -711,6 +796,13 @@ async def realtime_check(session: AsyncSession) -> list[dict]:
         tp_logs = await check_take_profit(session, account, pos, price)
         for tp_log in tp_logs:
             actions.append({"action": "take_profit", "code": pos.code, "name": pos.name, "price": price})
+        if tp_logs and pos.shares <= 0:
+            continue  # Position fully sold (trailing drawdown)
+
+        # Check pyramid add (layer 2/3)
+        pyramid_log = await check_and_execute_pyramid_add(session, account, pos, price)
+        if pyramid_log:
+            actions.append({"action": "pyramid_add", "code": pos.code, "name": pos.name, "price": price})
 
         # Update trailing state
         await update_trailing_state(session, pos)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from datetime import datetime
 from typing import Any
@@ -13,7 +14,7 @@ from loguru import logger
 
 from app.core.database import AsyncSessionLocal
 from app.services.trading_service import (
-    get_or_create_account,
+    get_account,
     get_positions_with_prices,
     update_account_value,
 )
@@ -27,6 +28,9 @@ class MonitorHub:
         self._connections: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
         self._broadcast_task: asyncio.Task | None = None
+        self._cached_is_active: bool = False
+        self._cache_valid_at: float = 0
+        self._cache_ttl: float = 5.0
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -152,10 +156,19 @@ class MonitorHub:
     async def _push_trading_data(self) -> None:
         if not self._connections:
             return
-        async with AsyncSessionLocal() as session:
-            account = await get_or_create_account(session)
-            if not account.is_active:
+        # Skip DB query if trading is not active (cache check)
+        if not self._cached_is_active:
+            now = time.monotonic()
+            if now - self._cache_valid_at < 10:
                 return
+        async with AsyncSessionLocal() as session:
+            account = await get_account(session)
+            if account is None or not account.is_active:
+                self._cached_is_active = False
+                self._cache_valid_at = time.monotonic()
+                return
+            self._cached_is_active = True
+            self._cache_valid_at = time.monotonic()
             positions = await get_positions_with_prices(session, account.id)
             value_info = await update_account_value(session, account)
             await session.commit()

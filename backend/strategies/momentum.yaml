@@ -1,10 +1,10 @@
 name: 动量策略
-description: 偏重技术面和情绪面，适合趋势跟踪
+description: 纯技术面 + 情绪面动量，不考虑基本面
 
 categories:
-  technical: 0.45
-  fundamental: 0.2
-  sentiment: 0.35
+  technical: 0.6
+  fundamental: 0.0
+  sentiment: 0.4
 
 factors:
   technical:
@@ -22,7 +22,10 @@ factors:
     profit_growth_score: { weight: 0.25 }
     debt_ratio_score: { weight: 0.10 }
   sentiment:
-    turnover_score: { weight: 0.30 }
-    capital_flow_score: { weight: 0.40 }
-    momentum_5d_score: { weight: 0.15 }
-    momentum_20d_score: { weight: 0.15 }
+    turnover_score: { weight: 0.10 }
+    capital_flow_score: { weight: 0.15 }
+    real_capital_flow_score: { weight: 0.20 }
+    chip_concentration_score: { weight: 0.05 }
+    sector_heat_score: { weight: 0.10 }
+    momentum_5d_score: { weight: 0.20 }
+    momentum_20d_score: { weight: 0.20 }

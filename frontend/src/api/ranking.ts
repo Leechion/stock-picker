@@ -15,3 +15,15 @@ export function getStockRank(code: string, strategy?: string) {
   if (strategy) params.strategy = strategy
   return client.get(`/rankings/${code}`, { params })
 }
+
+export function getRankingHistory(code: string, days: number = 30, strategy?: string) {
+  const params: Record<string, unknown> = { days }
+  if (strategy) params.strategy = strategy
+  return client.get(`/rankings/history/${code}`, { params })
+}
+
+export function getPeerStocks(code: string, strategy?: string) {
+  const params: Record<string, unknown> = {}
+  if (strategy) params.strategy = strategy
+  return client.get(`/rankings/peers/${code}`, { params })
+}

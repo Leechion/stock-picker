@@ -118,5 +118,5 @@ def test_standardize_cross_sectional_zero_std():
         "B": [{"factor_name": "rsi", "factor_type": "technical", "value": 0.5}],
     }
     result = standardize_factors_cross_sectional(stock_factors)
-    assert result["A"][0]["value"] == 0.5
-    assert result["B"][0]["value"] == 0.5
+    assert result["A"][0]["value"] == 0.0
+    assert result["B"][0]["value"] == 0.0

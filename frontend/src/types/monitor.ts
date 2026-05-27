@@ -22,6 +22,6 @@ export interface WSTradeEvent {
   timestamp: string
 }
 
-export type WSChannel = 'positions' | 'account' | 'trades' | 'market' | 'system' | 'alerts'
+export type WSChannel = 'positions' | 'account' | 'trades' | 'market' | 'system' | 'alerts' | 'sync_progress'
 
 export type WSMessageHandler = (data: unknown) => void
