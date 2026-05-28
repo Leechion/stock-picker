@@ -181,3 +181,66 @@ async def daily_summary(session: AsyncSession = Depends(get_db)):
     sent = send_wechat_work(settings.wechat_webhook_url, msg)
 
     return _ok({"sent": sent, "total_pnl": round(total_pnl, 2), "total_pnl_pct": round(total_pnl_pct, 2)})
+
+
+@router.post("/trading/manual-buy")
+async def manual_buy(
+    code: str = Query(..., description="股票代码"),
+    price: float | None = Query(default=None, description="买入价格，不填则取实时行情"),
+    session: AsyncSession = Depends(get_db),
+):
+    """Manually buy a stock by code."""
+    import asyncio
+    from app.services.trading_service import (
+        get_or_create_account,
+        execute_buy,
+        compute_atr,
+        refresh_live_prices,
+    )
+    from app.models.stock import StockInfo
+    from sqlalchemy import select
+
+    account = await get_or_create_account(session)
+    if not account.is_active:
+        return _err("交易未启动，请先点击'启动交易'")
+
+    # Check if already holding
+    from app.models.trading import Position
+    stmt = select(Position).where(Position.account_id == account.id, Position.code == code)
+    result = await session.execute(stmt)
+    if result.scalar_one_or_none():
+        return _err(f"已持有 {code}，不能重复买入")
+
+    # Get stock name
+    name_stmt = select(StockInfo.name).where(StockInfo.code == code)
+    nr = await session.execute(name_stmt)
+    name = nr.scalar_one_or_none() or code
+
+    # Get price
+    if price is None:
+        loop = asyncio.get_running_loop()
+        prices = await loop.run_in_executor(None, refresh_live_prices, [code])
+        price = prices.get(code)
+        if not price:
+            return _err(f"无法获取 {code} 的实时价格，请手动输入价格")
+
+    # Compute ATR for stop-loss
+    atr = await compute_atr(session, code)
+    if atr is None:
+        atr = round(price * 0.05, 2)  # fallback: 5% of price
+
+    # Use a high rank (1) for manual buys to maximize position size
+    log = await execute_buy(session, account, code, name, rank=1, price=price, atr=atr)
+    if log is None:
+        return _err(f"资金不足，无法买入 {name}({code}) @ {price:.2f}")
+
+    await session.commit()
+    return _ok({
+        "code": code,
+        "name": name,
+        "shares": log.shares,
+        "price": log.price,
+        "amount": round(log.amount, 2),
+        "stop_loss": round(price - 2 * atr, 2),
+        "reason": log.reason,
+    })
