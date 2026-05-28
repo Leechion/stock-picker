@@ -23,3 +23,9 @@ export function stopTradingBot() {
 export function resetTradingAccount() {
   return client.post('/trading/reset')
 }
+
+export function manualBuy(code: string, price?: number) {
+  const params: Record<string, string | number> = { code }
+  if (price != null) params.price = price
+  return client.post('/trading/manual-buy', null, { params })
+}

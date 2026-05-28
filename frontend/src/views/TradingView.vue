@@ -27,8 +27,25 @@
           停止交易
         </el-button>
         <el-button :loading="actionLoading" @click="handleReset">重置账户</el-button>
+        <el-button type="success" @click="showBuyDialog = true">手动买入</el-button>
       </div>
     </div>
+
+    <!-- Manual Buy Dialog -->
+    <el-dialog v-model="showBuyDialog" title="手动买入" width="400px" :close-on-click-modal="false">
+      <el-form label-position="top">
+        <el-form-item label="股票代码">
+          <el-input v-model="buyForm.code" placeholder="如 600519" />
+        </el-form-item>
+        <el-form-item label="买入价格（留空自动获取实时价）">
+          <el-input-number v-model="buyForm.price" :min="0.01" :precision="2" :step="0.01" style="width: 100%" controls-position="right" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showBuyDialog = false">取消</el-button>
+        <el-button type="primary" :loading="buyLoading" @click="handleManualBuy">确认买入</el-button>
+      </template>
+    </el-dialog>
 
     <!-- Account Overview -->
     <div class="account-cards">
@@ -206,6 +223,7 @@ import {
   startTradingBot,
   stopTradingBot,
   resetTradingAccount,
+  manualBuy,
 } from '@/api/trading'
 import { useMonitorStore } from '@/store'
 import { monitorWs } from '@/utils/websocket'
@@ -222,6 +240,10 @@ const logsLoading = ref(false)
 const logsPage = ref(1)
 const logsTotal = ref(0)
 const tradeLogs = ref<Record<string, unknown>[]>([])
+
+const showBuyDialog = ref(false)
+const buyLoading = ref(false)
+const buyForm = ref({ code: '', price: undefined as number | undefined })
 
 let _pollTimer: ReturnType<typeof setInterval> | null = null
 
@@ -348,6 +370,25 @@ async function handleReset() {
     stopPolling()
   } catch { ElMessage.error('重置失败') }
   finally { actionLoading.value = false }
+}
+
+async function handleManualBuy() {
+  if (!buyForm.value.code.trim()) {
+    ElMessage.warning('请输入股票代码')
+    return
+  }
+  buyLoading.value = true
+  try {
+    const { data: resp } = await manualBuy(buyForm.value.code.trim(), buyForm.value.price)
+    const d = (resp as any).data ?? resp
+    ElMessage.success(`买入成功: ${d.name} ${d.shares}股 @ ${d.price?.toFixed(2)}`)
+    showBuyDialog.value = false
+    buyForm.value = { code: '', price: undefined }
+    await loadInitialData()
+    loadLogs()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.message || '买入失败')
+  } finally { buyLoading.value = false }
 }
 
 async function loadInitialData() {
