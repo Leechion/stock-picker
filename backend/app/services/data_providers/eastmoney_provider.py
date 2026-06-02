@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 import pandas as pd
 import httpx
 from loguru import logger
@@ -108,6 +111,7 @@ class EastmoneyProvider(DataProvider):
                 break
             except Exception as exc:
                 last_error = exc
+                time.sleep(0.5)
         else:
             logger.error(f"[{self.name}] All kline hosts failed for {code}: {last_error}")
             return pd.DataFrame()
@@ -169,6 +173,7 @@ class EastmoneyProvider(DataProvider):
                     break
                 except Exception as exc:
                     last_error = exc
+                    await asyncio.sleep(0.5)
             else:
                 logger.error(f"[{self.name}] All kline hosts failed for {code}: {last_error}")
                 return pd.DataFrame()

@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
-    database_url: str = "sqlite+aiosqlite:///./stock_picker.db"
+    database_url: str = "sqlite+aiosqlite:///./stock_picker.db?timeout=30"
     redis_url: str = "redis://localhost:6379/0"
 
     data_refresh_hours: str = "13,15"
