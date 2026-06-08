@@ -1,8 +1,10 @@
 <div align="center">
 
-# Stock Picker
+<img src="frontend/public/icon.svg" width="64" height="64" alt="StockPicker" />
 
-**A 股量化多因子选股平台**
+# QuantBlade
+
+**量剑 — A 股量化多因子选股平台**
 
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)
@@ -10,9 +12,9 @@
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?logo=typescript&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
-多因子量化选股 · 模拟交易引擎 · WebSocket 实时监控 · AI 智能分析 · 企微机器人交互
+多因子量化选股 · AI 明日推荐 · 模拟交易引擎 · WebSocket 实时监控 · 企微机器人交互
 
-[快速开始](#-快速开始) · [系统架构](#-系统架构) · [策略详解](#-多因子策略) · [模拟交易](#-模拟交易引擎) · [API 文档](#-api-接口)
+[快速开始](#-快速开始) · [系统架构](#-系统架构) · [AI 明日推荐](#-ai-明日推荐) · [策略详解](#-多因子策略) · [模拟交易](#-模拟交易引擎) · [API 文档](#-api-接口)
 
 </div>
 
@@ -55,12 +57,31 @@
 </td>
 <td width="50%">
 
+### AI 明日推荐
+- 每日 14:30 自动采集全市场实时行情
+- DeepSeek 大模型分析市场，自主选出 0-5 只明日标的
+- 企微群自动推送，前端历史战绩可回溯
+- 次日盘后自动回测涨跌幅，统计命中率
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
 ### AI 智能分析 & 企微机器人
 - DeepSeek 大模型生成个股深度点评
 - 企业微信 @机器人即时查询
 - `000001` 查行情，`600519 评分` 查因子
 - `600519 分析` 触发 AI 深度分析
-- 群消息自动推送 (Webhook + App)
+- 群消息自动推送 (Webhook)
+
+</td>
+<td width="50%">
+
+### 预警提醒
+- 自定义价格/涨跌幅/排名变动预警
+- 触发后自动推送到企微群
+- 支持多条件组合
 
 </td>
 </tr>
@@ -90,6 +111,7 @@ graph TB
             RankingService["排名服务<br/>加权评分排序"]
             TradingEngine["交易引擎<br/>买卖 · 仓位 · 止损"]
             AIReport["AI 分析<br/>DeepSeek 接口"]
+            AIPick["AI 选股<br/>明日推荐"]
             WeChatBot["企微机器人<br/>回调 · 解密 · 应答"]
         end
     end
@@ -101,20 +123,21 @@ graph TB
 
     subgraph External["<b>外部服务</b>"]
         AkShare["akshare<br/>A 股数据源"]
-        DeepSeek_API["DeepSeek API<br/>AI 分析"]
+        DeepSeek_API["DeepSeek API<br/>AI 分析 · 选股"]
         WeChat_API["企业微信 API<br/>消息推送 · 机器人"]
     end
 
     UI --> API
     WS_Client <-->|实时数据| WS_Hub
     API --> Services
-    Services --> DataService & FactorEngine & RankingService & TradingEngine & AIReport & WeChatBot
+    Services --> DataService & FactorEngine & RankingService & TradingEngine & AIPick & AIReport & WeChatBot
     DataService --> AkShare
+    AIPick --> DeepSeek_API
     AIReport --> DeepSeek_API
     WeChatBot --> WeChat_API
     Services --> DB
     TradingEngine --> Redis
-    Scheduler --> DataService & TradingEngine
+    Scheduler --> DataService & TradingEngine & AIPick
 ```
 
 ---
@@ -147,7 +170,59 @@ sequenceDiagram
     Cron->>TE: 更新 ATR 止损线
     TE->>WS: 推送当日盈亏
     TE-->>WX: 发送当日交易总结
+
+    Note over Cron, WX: AI 明日推荐 (14:30)
+    Cron->>DS: 采集实时市场快照
+    DS->>DS: DeepSeek 分析选股
+    DS-->>WX: 推送明日推荐标的
 ```
+
+---
+
+## AI 明日推荐
+
+每日 14:30 自动触发，AI 基于当天实时行情选出次日可能上涨的标的。
+
+```mermaid
+sequenceDiagram
+    participant Cron as 定时任务 (14:30)
+    participant Snap as 行情采集
+    participant DS as DeepSeek API
+    participant DB as 数据库
+    participant WX as 企微推送
+    participant BT as 次日回测
+
+    Note over Cron, BT: 14:30 选股流程
+    Cron->>Snap: 采集市场快照
+    Snap->>Snap: 大盘指数 · 板块涨跌 · 涨跌分布
+    Snap->>Snap: 涨停板 · 成交量 · 活跃个股
+    Snap->>DS: 构建 Prompt → AI 分析
+    DS-->>Cron: 0-5 只推荐标的 (JSON)
+    Cron->>DB: 存储推荐结果
+    Cron-->>WX: 推送推荐到企微群
+
+    Note over Cron, BT: 次日 9:26 / 15:05 回测
+    BT->>DB: 回填开盘价 / 收盘价
+    BT->>DB: 计算涨跌幅 → 更新战绩
+```
+
+### 数据采集范围
+
+| 维度 | 内容 |
+|------|------|
+| 大盘指数 | 上证 / 深证 / 创业板 / 科创50 实时涨跌幅 |
+| 板块表现 | 行业板块涨跌榜 |
+| 涨跌分布 | 上涨 / 平盘 / 下跌家数，涨停 / 跌停家数 |
+| 成交量 | 今日成交额 vs 前 5 日均值 |
+| 活跃个股 | 各行业成交量前列个股（按行业分组） |
+| 涨停板 | 当日涨停个股（按行业分组） |
+
+### 前端页面
+
+访问 `/ai-recommend` 查看：
+- 今日推荐列表 + AI 市场概况
+- 历史战绩统计（命中率、平均收益）
+- 按日期回溯历史推荐
 
 ---
 
@@ -540,6 +615,12 @@ WECHAT_ENCODING_AES_KEY=your-aes-key
 | | `POST` | `/api/trading/reset` | 重置账户 |
 | **实时监控** | | | |
 | | `WS` | `/api/ws/monitor` | WebSocket 实时推送 |
+| **AI 推荐** | | | |
+| | `GET` | `/api/ai-picks/today` | 今日推荐 |
+| | `GET` | `/api/ai-picks/history` | 历史推荐 (分页) |
+| | `GET` | `/api/ai-picks/stats` | 战绩统计 |
+| **实时监控** | | | |
+| | `WS` | `/api/ws/monitor` | WebSocket 实时推送 |
 | **企业微信** | | | |
 | | `GET` | `/api/wechat/callback` | 回调验证 |
 | | `POST` | `/api/wechat/callback` | 消息接收 |
@@ -564,7 +645,8 @@ shares/
 │   │   │   ├── backtest.py      #   回测
 │   │   │   ├── trading.py       #   模拟交易
 │   │   │   ├── monitor.py       #   WebSocket 监控
-│   │   │   └── wechat.py        #   企微机器人回调
+│   │   │   ├── wechat.py        #   企微机器人回调
+│   │   │   └── ai_picks.py      #   AI 明日推荐
 │   │   ├── core/
 │   │   │   ├── config.py        #   配置 (Pydantic Settings)
 │   │   │   ├── database.py      #   数据库连接
@@ -574,6 +656,10 @@ shares/
 │   │   │   ├── cache.py         #   缓存
 │   │   │   └── redis.py         #   Redis 连接
 │   │   ├── models/              # SQLAlchemy 数据模型
+│   │   │   ├── stock.py         #   股票 · 日线 · 因子 · 排名
+│   │   │   ├── trading.py       #   账户 · 持仓 · 交易日志
+│   │   │   ├── alert.py         #   预警规则 · 预警记录
+│   │   │   └── ai_pick.py       #   AI 选股记录
 │   │   ├── schemas/             # Pydantic 请求/响应
 │   │   ├── services/            # 业务逻辑
 │   │   │   ├── data_service.py  #   数据同步 (21KB)
@@ -587,6 +673,7 @@ shares/
 │   │   │   ├── sector_service.py # 板块分析
 │   │   │   ├── strategy_loader.py # 策略加载器
 │   │   │   ├── notification_service.py # 微信通知
+│   │   │   ├── ai_pick_service.py #   AI 选股 + 回测
 │   │   │   └── data_providers/  #   数据源抽象
 │   │   └── tasks/               # 定时任务定义
 │   ├── strategies/              # YAML 策略配置
@@ -603,6 +690,8 @@ shares/
 │       │   ├── FactorAnalysis.vue # 因子分析
 │       │   ├── SectorRanking.vue # 行业排名
 │       │   ├── TradingView.vue  #   模拟交易
+│       │   ├── AIRecommendView.vue # AI 明日推荐
+│       │   ├── AlertView.vue    #   智能预警
 │       │   └── Settings.vue     #   设置
 │       ├── components/          # 公共组件
 │       ├── store/               # Pinia 状态

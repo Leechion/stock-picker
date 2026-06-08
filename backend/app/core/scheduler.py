@@ -9,6 +9,7 @@ from app.models.stock import StockInfo
 from app.services.data_service import sync_all_stocks, get_history, sync_fundamentals
 from app.services.factor_engine import compute_all_factors
 from app.services.notification_service import send_daily_notification
+from app.services.ai_pick_service import run_ai_pick_task, backtest_ai_picks_open, backtest_ai_picks_close
 
 scheduler: AsyncIOScheduler | None = None
 
@@ -393,6 +394,37 @@ def register_scheduler() -> None:
         day_of_week="mon-fri",
         id="trading_daily_summary",
         name="Daily trading summary to WeChat",
+        replace_existing=True,
+    )
+    # AI tomorrow pick jobs
+    scheduler.add_job(
+        run_ai_pick_task,
+        trigger="cron",
+        hour=14,
+        minute=30,
+        day_of_week="mon-fri",
+        id="ai_pick",
+        name="AI pick for tomorrow",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        backtest_ai_picks_open,
+        trigger="cron",
+        hour=9,
+        minute=26,
+        day_of_week="mon-fri",
+        id="ai_pick_backtest_open",
+        name="Backtest AI picks - open price",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        backtest_ai_picks_close,
+        trigger="cron",
+        hour=15,
+        minute=5,
+        day_of_week="mon-fri",
+        id="ai_pick_backtest_close",
+        name="Backtest AI picks - close price",
         replace_existing=True,
     )
     scheduler.start()

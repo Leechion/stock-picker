@@ -8,13 +8,27 @@
           <div class="header-content">
             <div class="header-left">
               <div class="logo-icon">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-                  <path d="M3 3h7v7H3V3zm11 0h7v7h-7V3zM3 14h7v7H3v-7zm11 0h7v7h-7v-7z" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
-                  <path d="M7 7l3 3m0 0l3 3m-3-3l-3 3m3-3l3-3" stroke="white" stroke-width="1.2" stroke-linecap="round" opacity="0.5"/>
+                <svg width="20" height="20" viewBox="0 0 32 32" fill="none">
+                  <line x1="6" y1="24" x2="6" y2="17" stroke="white" stroke-width="1.4" stroke-linecap="round" opacity="0.6"/>
+                  <rect x="3.5" y="20" width="5" height="4" rx="1" fill="none" stroke="white" stroke-width="1.2" opacity="0.6"/>
+                  <line x1="13" y1="24" x2="13" y2="14" stroke="#ef4444" stroke-width="1.4" stroke-linecap="round"/>
+                  <rect x="10.5" y="17" width="5" height="7" rx="1" fill="#ef4444" stroke="#ef4444" stroke-width="0.8"/>
+                  <line x1="20" y1="22" x2="20" y2="12" stroke="#ef4444" stroke-width="1.4" stroke-linecap="round"/>
+                  <rect x="17.5" y="15" width="5" height="7" rx="1" fill="#ef4444" stroke="#ef4444" stroke-width="0.8"/>
+                  <g class="candle-rocket">
+                    <g class="candle-normal">
+                      <line x1="27" y1="20" x2="27" y2="10" stroke="#ef4444" stroke-width="1.6" stroke-linecap="round"/>
+                      <rect x="24.5" y="13" width="5" height="7" rx="1" fill="#ef4444" stroke="#ef4444" stroke-width="0.8"/>
+                    </g>
+                    <g class="candle-limitup">
+                      <line x1="27" y1="20" x2="27" y2="4" stroke="#ef4444" stroke-width="1.6" stroke-linecap="round"/>
+                      <rect x="24.5" y="6" width="5" height="14" rx="1" fill="#ef4444" stroke="#ef4444" stroke-width="0.8"/>
+                    </g>
+                  </g>
                 </svg>
               </div>
               <div class="header-titles">
-                <span class="app-title">StockPicker</span>
+                <span class="app-title">QuantBlade</span>
                 <span class="app-subtitle">A股量化多因子选股</span>
                 <span class="status-dot">
                   <span class="status-pulse"></span>
@@ -74,6 +88,10 @@
                 <el-icon><Bell /></el-icon>
                 <template #title>智能预警</template>
               </el-menu-item>
+              <el-menu-item index="/ai-recommend">
+                <el-icon><MagicStick /></el-icon>
+                <template #title>AI明日推荐</template>
+              </el-menu-item>
               <el-menu-item index="/settings">
                 <el-icon><Setting /></el-icon>
                 <template #title>系统设置</template>
@@ -111,6 +129,7 @@ import {
   TrendCharts,
   DataLine,
   Bell,
+  MagicStick,
 } from '@element-plus/icons-vue'
 import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 
@@ -214,6 +233,25 @@ watch(darkMode, (val) => {
   box-shadow: 0 4px 16px rgba(124, 58, 237, 0.4);
 }
 
+/* Candle rocket — last candle hits limit-up on hover */
+.candle-rocket {
+  position: relative;
+}
+.candle-normal {
+  transition: opacity 0.3s ease;
+}
+.candle-limitup {
+  opacity: 0;
+  transition: opacity 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.logo-icon:hover .candle-normal {
+  opacity: 0;
+}
+.logo-icon:hover .candle-limitup {
+  opacity: 1;
+}
+
 .header-titles {
   display: flex;
   align-items: baseline;
@@ -221,10 +259,11 @@ watch(darkMode, (val) => {
 }
 
 .app-title {
-  font-size: 15px;
-  font-weight: 600;
+  font-size: 16px;
+  font-weight: 700;
   color: var(--text-primary);
-  letter-spacing: -0.01em;
+  letter-spacing: 0.02em;
+  font-family: 'Inter', -apple-system, 'PingFang SC', sans-serif;
 }
 
 .app-subtitle {
@@ -233,6 +272,7 @@ watch(darkMode, (val) => {
   color: var(--text-muted);
   padding-left: 10px;
   border-left: 1px solid var(--border-subtle);
+  letter-spacing: 0.04em;
 }
 
 .status-dot {
@@ -460,19 +500,26 @@ html.dark {
 body {
   background-color: var(--bg-body);
   color: var(--text-primary);
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: 'Inter', -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
   font-weight: 400;
+  font-size: 14px;
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
   margin: 0;
   transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 h1, h2, h3, h4, h5, h6 {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: 'Inter', -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
   font-weight: 600;
   letter-spacing: -0.02em;
+  line-height: 1.3;
 }
+
+h2 { font-size: 20px; font-weight: 700; }
+h3 { font-size: 16px; font-weight: 600; }
 
 /* ===== Card ===== */
 .el-card {
@@ -687,7 +734,16 @@ html.dark .el-card:hover {
 
 /* ===== Data Font Utility ===== */
 .font-mono {
-  font-family: 'Fira Code', 'Roboto Mono', monospace;
+  font-family: 'Fira Code', 'SF Mono', 'Cascadia Code', 'Roboto Mono', monospace;
+  font-feature-settings: 'tnum' 1, 'cv01' 1;
+  letter-spacing: 0.01em;
+}
+
+/* Fira Code tabular numbers + alternate 'a' for cleaner look */
+.font-mono--tight {
+  font-family: 'Fira Code', 'SF Mono', monospace;
+  font-feature-settings: 'tnum' 1, 'calt' 0;
+  letter-spacing: 0;
 }
 
 /* ===== Stock Colors (theme-aware) ===== */

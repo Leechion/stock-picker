@@ -51,6 +51,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '智能预警' },
   },
   {
+    path: '/ai-recommend',
+    name: 'AIRecommend',
+    component: () => import('@/views/AIRecommendView.vue'),
+    meta: { title: 'AI明日推荐' },
+  },
+  {
     path: '/settings',
     name: 'Settings',
     component: () => import('@/views/Settings.vue'),
@@ -65,7 +71,7 @@ const router = createRouter({
 })
 
 router.beforeEach((to, _from, next) => {
-  document.title = `${to.meta.title || '智能选股'} - A股量化多因子分析`
+  document.title = `${to.meta.title || 'QuantBlade'} - 量剑 量化选股`
   next()
 })
 

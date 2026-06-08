@@ -9,7 +9,7 @@ from loguru import logger
 
 from app.core.config import settings
 from app.core.database import Base, engine
-from app.api import health, stocks, factors, ranking, strategy, sectors, backtest, trading, monitor, wechat, alerts
+from app.api import health, stocks, factors, ranking, strategy, sectors, backtest, trading, monitor, wechat, alerts, ai_picks
 
 
 @asynccontextmanager
@@ -72,9 +72,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="智能选股系统",
+        title="QuantBlade",
         version="0.1.0",
-        description="A股量化多因子选股平台",
+        description="量剑 - A股量化多因子选股平台",
         docs_url="/api/docs",
         redoc_url="/api/redoc",
         lifespan=lifespan,
@@ -99,6 +99,7 @@ def create_app() -> FastAPI:
     app.include_router(monitor.router, prefix="/api")
     app.include_router(wechat.router, prefix="/api")
     app.include_router(alerts.router, prefix="/api")
+    app.include_router(ai_picks.router, prefix="/api")
 
     return app
 

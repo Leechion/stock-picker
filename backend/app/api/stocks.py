@@ -70,6 +70,8 @@ async def get_stock_history(
     days: int = Query(default=120, ge=1, le=1000),
     session: AsyncSession = Depends(get_db),
 ):
+    import math
+
     df = await get_history(session, code, days)
     records = []
     if not df.empty:
@@ -77,6 +79,11 @@ async def get_stock_history(
         if "trade_date" in df.columns:
             df["trade_date"] = df["trade_date"].astype(str)
         records = df.to_dict(orient="records")
+        # Replace NaN/Inf with None for JSON serialization
+        for r in records:
+            for k, v in r.items():
+                if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                    r[k] = None
     return _ok(records)
 
 
