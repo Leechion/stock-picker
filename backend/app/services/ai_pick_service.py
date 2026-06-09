@@ -223,6 +223,8 @@ async def collect_market_snapshot() -> dict:
 
 AI_PICK_SYSTEM_PROMPT = """你是一个经验丰富的A股短线交易分析师。每天下午2:30，你需要根据当日实时市场数据，选出明天最有可能上涨的股票。
 
+注意：不要推荐创业板(300xxx)和科创板(688xxx)的股票，用户没有交易权限。
+
 你必须严格返回JSON格式，不要加任何其他文字：
 {
   "market_summary": "一句话概括今日市场核心特征",
