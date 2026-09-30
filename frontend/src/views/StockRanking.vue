@@ -73,13 +73,40 @@
           <span>排名列表</span>
         </div>
         <div class="filter-bar">
-          <el-select v-model="industryFilter" placeholder="全部行业" clearable size="small" style="width: 140px">
-            <el-option v-for="ind in industryList" :key="ind" :label="ind" :value="ind" />
-          </el-select>
-          <el-input v-model="searchQuery" placeholder="搜索代码或名称" :prefix-icon="Search" clearable size="small" style="width: 180px" />
+          <el-tooltip
+            content="行业筛选仅作用于当前页数据（后端 /rankings/ 暂不支持 industry 参数）"
+            placement="top"
+          >
+            <el-select v-model="industryFilter" placeholder="全部行业" clearable size="small" style="width: 140px">
+              <el-option v-for="ind in industryList" :key="ind" :label="ind" :value="ind" />
+            </el-select>
+          </el-tooltip>
+          <el-input v-model="searchQuery" placeholder="搜索代码或名称（全量）" :prefix-icon="Search" clearable size="small" style="width: 180px" />
           <el-button size="small" @click="exportCSV">导出 CSV</el-button>
         </div>
       </div>
+
+      <!-- 诚实降级提示: 后端 /rankings/ 尚无 industry 参数，行业筛选只能在已拉取的
+           当前页数据上做。必须显式告知用户"仅当前页"，否则第 2 页存在匹配项而第 1 页
+           没有时，用户会看到空列表并误以为全市场没有该行业的股票。 -->
+      <el-alert
+        v-if="industryFilter"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="filter-notice"
+      >
+        <template #title>
+          行业「{{ industryFilter }}」仅在<strong>当前页</strong>筛选：本页 {{ filteredRankings.length }} / {{ rankings.length }} 条匹配
+        </template>
+        <template #default>
+          <span class="filter-notice-hint">
+            后端暂不支持服务端行业过滤，全量结果中的匹配项可能分布在其他页。
+            搜索框为服务端过滤（跨页生效），可用它直接定位；或清除行业筛选后逐页查看。
+          </span>
+        </template>
+      </el-alert>
+
       <StockTable
         :data="filteredRankings"
         :total="totalRankings"
@@ -93,7 +120,7 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, onBeforeRouteUpdate } from 'vue-router'
 import { Refresh, Search, DataLine, Clock, Trophy, TrendCharts, List } from '@element-plus/icons-vue'
 import { useStocksStore } from '@/store'
@@ -112,6 +139,8 @@ const pageSize = ref(20)
 const industryFilter = ref('')
 const searchQuery = ref('')
 const activeStrategy = ref('')
+// 单调递增的请求序号，用于丢弃过期响应
+let requestSeq = 0
 
 const rankings = computed(() => store.rankings)
 const totalRankings = computed(() => store.totalRankings)
@@ -133,15 +162,13 @@ const industryList = computed(() => {
 })
 
 const filteredRankings = computed(() => {
+  // NOTE (降级方案 B): industry 过滤是纯客户端的，且只作用于"当前页"已拉取的数据。
+  // 后端 GET /rankings/ 目前不接受 industry 参数，所以无法做到跨页完整筛选。
+  // 我们保留本地过滤以维持可用性，但通过上方 el-alert 明确标注"仅当前页"，
+  // 不把它伪装成完整结果。待后端支持 industry 后再改为服务端过滤。
   let list = rankings.value
   if (industryFilter.value) {
     list = list.filter((r) => r.industry === industryFilter.value)
-  }
-  if (searchQuery.value) {
-    const q = searchQuery.value.toLowerCase()
-    list = list.filter(
-      (r) => r.code.toLowerCase().includes(q) || (r.name || '').includes(q)
-    )
   }
   return list
 })
@@ -153,17 +180,59 @@ async function loadActiveStrategy() {
   } catch { /* ignore */ }
 }
 
+let searchTimer: ReturnType<typeof setTimeout> | null = null
+
 async function loadRankings() {
+  // 防止过期响应覆盖新响应（例如快速切换页码/搜索词时）。
+  const token = ++requestSeq
   store.setRankingsLoading(true)
   try {
-    const { data } = await getRankings(currentPage.value, pageSize.value, activeStrategy.value)
+    const search = searchQuery.value.trim() || undefined
+    const { data } = await getRankings(currentPage.value, pageSize.value, activeStrategy.value, search)
+    if (token !== requestSeq) return
     const pageData = data as PaginatedData<RankingItem>
     const items = pageData.items || []
     store.setRankings(items, pageData.total || items.length)
     store.setLastUpdate(new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }))
   } catch { /* handled */ }
-  finally { store.setRankingsLoading(false) }
+  finally {
+    if (token === requestSeq) store.setRankingsLoading(false)
+  }
 }
+
+/**
+ * 重置到第 1 页并按需重新加载。
+ * 若 currentPage 本身已在第 1 页，watch(currentPage) 不会触发，因此这里
+ * 必须显式发起请求，避免"页码没变所以没刷新"的空窗。
+ */
+function resetToFirstPageAndReload() {
+  if (currentPage.value !== 1) {
+    currentPage.value = 1 // 由 watch(currentPage) 触发 loadRankings
+  } else {
+    loadRankings()
+  }
+}
+
+// 标记"本次页码变更来自 pageSize 重置"，避免 currentPage 的 watch 重复发请求
+let pageResetGuard = false
+
+// Debounced search: 300ms 防抖 + 重置到第 1 页后重新加载（search 为服务端过滤）
+watch(searchQuery, () => {
+  if (searchTimer) clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => {
+    searchTimer = null
+    resetToFirstPageAndReload()
+  }, 300)
+})
+
+// 组件卸载时清理未触发的防抖定时器，避免定时器在组件销毁后触发
+// resetToFirstPageAndReload() 造成泄漏与对已卸载组件的多余请求。
+onUnmounted(() => {
+  if (searchTimer) {
+    clearTimeout(searchTimer)
+    searchTimer = null
+  }
+})
 
 async function refreshData() {
   loading.value = true
@@ -201,7 +270,20 @@ onMounted(async () => {
   await loadActiveStrategy()
   loadRankings()
 })
-watch([currentPage, pageSize], () => { loadRankings() })
+
+// pageSize 变化会改变总页数，停留在旧页码可能越界并返回空列表，因此重置到第 1 页。
+// 若 currentPage 原本不在第 1 页，把它置 1 会同时触发 currentPage 的 watch；
+// 用 bumpPage() 让"因重置而产生的页码变更"不再重复发请求，只发一次。
+watch(pageSize, () => {
+  pageResetGuard = true
+  resetToFirstPageAndReload()
+  // 等 currentPage 的 watch（同步队列）跑完再解除标记
+  Promise.resolve().then(() => { pageResetGuard = false })
+})
+watch(currentPage, () => {
+  if (pageResetGuard) return
+  loadRankings()
+})
 </script>
 
 <style scoped>
@@ -346,6 +428,15 @@ watch([currentPage, pageSize], () => { loadRankings() })
   display: flex;
   gap: 8px;
   align-items: center;
+}
+
+.filter-notice {
+  margin-bottom: 14px;
+}
+
+.filter-notice-hint {
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .table-header {

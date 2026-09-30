@@ -30,8 +30,8 @@ async def _redis_get(key: str) -> dict | None:
                 if isinstance(td, str):
                     rec["trade_date"] = dt_date.fromisoformat(td)
             return data
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"Redis cache read failed for {key}: {exc}")
     return None
 
 
@@ -42,8 +42,8 @@ async def _redis_set(key: str, data: dict, ttl: int = 86400) -> None:
         from app.core.redis import get_redis
         redis = await get_redis()
         await redis.set(key, json.dumps(data, ensure_ascii=False, default=str), ex=ttl)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"Redis cache write failed for {key}: {exc}")
 
 # Set when the server is shutting down — checked in long-running sync loops
 shutdown_event = asyncio.Event()
@@ -265,29 +265,41 @@ async def sync_all_stocks(session: AsyncSession, days_back: int = 80, include_hi
     # Broadcast initial progress
     _broadcast_sync_progress(0, len(candidates), "syncing")
 
-    tasks = [_fetch_with_progress(code, name, ind, lat) for code, name, ind, lat in candidates]
-    try:
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-    except asyncio.CancelledError:
-        logger.warning("Stock sync cancelled, cleaning up...")
-        for t in tasks:
-            if not t.done():
-                t.cancel()
-        raise
-
+    # Process in batches so cancellation can take effect quickly
+    BATCH_SIZE = 50
     synced_records: list[dict] = []
-    for i, result in enumerate(results):
+    all_results: list = []
+    # Must be initialised before the loop: on the normal (non-cancelled) path
+    # neither `break` branch executes, and the flag is read after the loop.
+    cancelled = False
+
+    for batch_start in range(0, len(candidates), BATCH_SIZE):
         if shutdown_event.is_set() or sync_cancel_event.is_set():
-            logger.warning("Sync cancelled, stopping early")
-            _broadcast_sync_progress(i, len(candidates), "cancelled")
-            if synced_records:
-                for j in range(0, len(synced_records), 500):
-                    await session.execute(insert(StockDaily), synced_records[j : j + 500])
-                await session.commit()
-            return len(inserted_codes)
+            logger.warning(f"Sync cancelled before batch {batch_start}")
+            cancelled = True
+            _broadcast_sync_progress(batch_start, len(candidates), "cancelled")
+            break
+
+        batch_end = min(batch_start + BATCH_SIZE, len(candidates))
+        batch = candidates[batch_start:batch_end]
+        batch_tasks = [_fetch_with_progress(code, name, ind, lat) for code, name, ind, lat in batch]
+
+        try:
+            batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+            all_results.extend(batch_results)
+        except asyncio.CancelledError:
+            logger.warning("Stock sync cancelled during batch, cleaning up...")
+            for t in batch_tasks:
+                if not t.done():
+                    t.cancel()
+            cancelled = True
+            _broadcast_sync_progress(batch_start, len(candidates), "cancelled")
+            break
+
+    for i, result in enumerate(all_results):
         if isinstance(result, Exception):
-            code = candidates[i][0]
-            logger.debug(f"Fetch failed for {code}: {result}")
+            if i < len(candidates):
+                logger.debug(f"Fetch failed for {candidates[i][0]}: {result}")
             continue
         if result is None:
             continue
@@ -307,7 +319,12 @@ async def sync_all_stocks(session: AsyncSession, days_back: int = 80, include_hi
 
         synced_records.extend(result["daily_records"])
 
-    _broadcast_sync_progress(len(candidates), len(candidates), "saving")
+    # On cancellation: persist what was already fetched, but never report
+    # full completion — progress stays at the cancellation point.
+    if cancelled:
+        _broadcast_sync_progress(progress_done, len(candidates), "cancelled")
+    else:
+        _broadcast_sync_progress(len(candidates), len(candidates), "saving")
 
     for i in range(0, len(synced_records), 500):
         await session.execute(insert(StockDaily), synced_records[i : i + 500])
@@ -321,8 +338,16 @@ async def sync_all_stocks(session: AsyncSession, days_back: int = 80, include_hi
         if inserted_codes:
             await redis.sadd(f"synced:{today}", *inserted_codes)
             await redis.expire(f"synced:{today}", 86400 * 2)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"Redis sync-state update failed: {exc}")
+
+    if cancelled:
+        _broadcast_sync_progress(progress_done, len(candidates), "cancelled")
+        logger.info(
+            f"Sync cancelled: {len(inserted_codes)} stocks, {len(synced_records)} daily records "
+            f"committed (partial, {progress_done}/{len(candidates)} fetched)"
+        )
+        return len(inserted_codes)
 
     _broadcast_sync_progress(len(candidates), len(candidates), "complete")
     logger.info(

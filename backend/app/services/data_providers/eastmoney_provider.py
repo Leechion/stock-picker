@@ -62,29 +62,36 @@ class EastmoneyProvider(DataProvider):
         return self._reachable
 
     def fetch_stock_list(self) -> pd.DataFrame:
-        params = {
-            "pn": "1",
-            "pz": "10000",
-            "po": "1",
-            "np": "1",
-            "ut": LIST_TOKEN,
-            "fltt": "2",
-            "invt": "2",
-            "fid": "f12",
-            "fs": "m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23,m:0 t:81 s:2048",
-            "fields": "f12,f14,f100",
-        }
-        resp = httpx.get(STOCK_LIST_URL, params=params, timeout=20.0, headers=HEADERS)
-        resp.raise_for_status()
-        payload = resp.json()
-        items = payload.get("data", {}).get("diff") or []
-        records = [
-            {"code": item.get("f12"), "name": item.get("f14"), "industry": item.get("f100")}
-            for item in items
-            if item.get("f12") and item.get("f14")
-        ]
-        df = pd.DataFrame(records)
-        logger.info(f"[{self.name}] Fetched {len(df)} stock codes")
+        all_records = []
+        for page in range(1, 10):
+            params = {
+                "pn": str(page),
+                "pz": "1000",
+                "po": "1",
+                "np": "1",
+                "ut": LIST_TOKEN,
+                "fltt": "2",
+                "invt": "2",
+                "fid": "f12",
+                "fs": "m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23",
+                "fields": "f12,f14,f100",
+            }
+            resp = httpx.get(STOCK_LIST_URL, params=params, timeout=20.0, headers=HEADERS)
+            resp.raise_for_status()
+            payload = resp.json()
+            items = payload.get("data", {}).get("diff") or []
+            if not items:
+                break
+            for item in items:
+                if item.get("f12") and item.get("f14"):
+                    code = str(item["f12"])
+                    if code.startswith(("00", "60")):
+                        all_records.append({
+                            "code": code, "name": item["f14"],
+                            "industry": item.get("f100"),
+                        })
+        df = pd.DataFrame(all_records)
+        logger.info(f"[{self.name}] Fetched {len(df)} stock codes (main board only)")
         return df
 
     def fetch_daily_data(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -137,23 +144,33 @@ class EastmoneyProvider(DataProvider):
         return df
 
     async def async_fetch_stock_list(self) -> pd.DataFrame:
+        """Fetch stock list from eastmoney, paginating over all A-shares."""
+        all_records = []
         async with httpx.AsyncClient(timeout=20.0, headers=HEADERS) as client:
-            params = {
-                "pn": "1", "pz": "10000", "po": "1", "np": "1",
-                "ut": LIST_TOKEN, "fltt": "2", "invt": "2", "fid": "f12",
-                "fs": "m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23,m:0 t:81 s:2048",
-                "fields": "f12,f14,f100",
-            }
-            resp = await client.get(STOCK_LIST_URL, params=params)
-            resp.raise_for_status()
-            payload = resp.json()
-            items = payload.get("data", {}).get("diff") or []
-            records = [
-                {"code": item.get("f12"), "name": item.get("f14"), "industry": item.get("f100")}
-                for item in items if item.get("f12") and item.get("f14")
-            ]
-            df = pd.DataFrame(records)
-            logger.info(f"[{self.name}] Fetched {len(df)} stock codes")
+            for page in range(1, 10):
+                params = {
+                    "pn": str(page), "pz": "1000", "po": "1", "np": "1",
+                    "ut": LIST_TOKEN, "fltt": "2", "invt": "2", "fid": "f12",
+                    "fs": "m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23",
+                    "fields": "f12,f14,f100",
+                }
+                resp = await client.get(STOCK_LIST_URL, params=params)
+                resp.raise_for_status()
+                payload = resp.json()
+                items = payload.get("data", {}).get("diff") or []
+                if not items:
+                    break
+                for item in items:
+                    if item.get("f12") and item.get("f14"):
+                        code = str(item["f12"])
+                        # Filter to main board only (client-side)
+                        if code.startswith(("00", "60")):
+                            all_records.append({
+                                "code": code, "name": item["f14"],
+                                "industry": item.get("f100"),
+                            })
+            df = pd.DataFrame(all_records)
+            logger.info(f"[{self.name}] Fetched {len(df)} stock codes (main board only)")
             return df
 
     async def async_fetch_daily_data(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:

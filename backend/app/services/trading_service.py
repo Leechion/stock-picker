@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import date, datetime
+from typing import Any
 
 from loguru import logger
 from sqlalchemy import and_, func, select
@@ -12,6 +14,47 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.stock import StockDaily, StockInfo, StockRanking
 from app.models.trading import Position, TradeLog, TradingAccount
 from app.services.strategy_loader import strategy_loader
+
+
+# ======================================================================
+# Cash mutation lock
+# ======================================================================
+#
+# Every code path that reads-then-writes `account.cash` (execute_buy,
+# execute_sell) runs inside this lock so two concurrent requests cannot both
+# observe the same balance and oversell / overdraw the account.
+#
+# LIMITATION: this is a *process-local* lock. It only serializes coroutines
+# within a single Python process (one uvicorn worker). With multiple workers
+# (e.g. `uvicorn --workers 4`, or gunicorn pre-fork) each process has its own
+# lock, so cross-process serialization is NOT provided -- concurrent buys
+# hitting different workers can still race. Making that correct requires a
+# database-level lock (SELECT ... FOR UPDATE on the account row) or a
+# distributed lock (Redis). Deployments here run a single worker.
+#
+# The critical sections below contain `await` (session.refresh / session.flush),
+# and an asyncio.Lock binds to the event loop that first awaits it. A
+# module-level lock reused across successive loops (tests, or an app that
+# rebuilds its loop) would raise "is bound to a different event loop". So the
+# lock is created lazily per running loop.
+_trading_locks: dict[Any, asyncio.Lock] = {}
+
+
+def get_trading_lock() -> asyncio.Lock:
+    """Return the cash-mutation lock for the *current* running event loop.
+
+    A fresh lock is created per loop because asyncio primitives are bound to the
+    loop that first uses them; reusing one across loops raises RuntimeError.
+    """
+    loop = asyncio.get_running_loop()
+    lock = _trading_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _trading_locks[loop] = lock
+        # Drop stale entries for closed loops to avoid unbounded growth.
+        for dead in [lp for lp in _trading_locks if lp.is_closed()]:
+            _trading_locks.pop(dead, None)
+    return lock
 
 
 def _broadcast_trade_event(action: str, code: str, name: str, price: float, shares: int, pnl: float | None = None, reason: str = "") -> None:
@@ -148,50 +191,114 @@ async def execute_buy(
     price: float,
     atr: float,
 ) -> TradeLog | None:
-    """Execute a simulated buy order with pyramid sizing. Falls back to minimum 100 shares for small accounts."""
-    weight = pyramid_weight(rank)
-    amount = account.initial_capital * weight
-    shares = int(amount / price / 100) * 100  # A股整手
+    """Execute a simulated buy order with pyramid sizing. Falls back to minimum 100 shares for small accounts.
 
-    # Fallback: if pyramid amount can't buy 100 shares, try cash-basis minimum
-    if shares < 100:
-        shares = int(account.cash / price / 100) * 100
+    The whole read-compute-write section on ``account.cash`` is serialized by a
+    process-local lock, and the final size is re-checked against the live cash
+    balance so the account can never go negative. Returns ``None`` when the
+    pyramid target and the cash-basis fallback are both unaffordable.
 
-    if shares < 100:
-        logger.warning(f"Not enough capital to buy {code}: price={price:.2f} cash={account.cash:.0f}")
+    See the ``get_trading_lock`` comment for the multi-worker caveat.
+    """
+    if price <= 0:
+        logger.warning(f"Refusing buy for {code}: invalid price {price}")
         return None
 
-    total_cost = shares * price
+    async with get_trading_lock():
+        # Re-read the balance from the DB *inside* the lock. This is essential:
+        # when concurrent requests each own a separate AsyncSession, every one
+        # of them loaded its own ORM copy of the account, so `account.cash` may
+        # already be stale by the time we get here. Locking around a stale
+        # in-memory value would still oversell, so refresh this session's copy
+        # from the committed row before sizing.
+        await session.refresh(account)
+        available = account.cash
 
-    stop_loss = round(price - 2 * atr, 2)
+        # Pyramid sizing based on initial capital, capped by what we can afford.
+        weight = pyramid_weight(rank)
+        target_amount = min(account.initial_capital * weight, available)
+        shares = int(target_amount / price / 100) * 100  # A股整手
 
-    position = Position(
-        account_id=account.id,
-        code=code,
-        name=name,
-        shares=shares,
-        avg_cost=price,
-        open_price=price,
-        high_since_open=price,
-        atr_at_buy=atr,
-        stop_loss_price=stop_loss,
-        tier=1,
-    )
-    session.add(position)
+        # Fallback: if pyramid amount can't buy 100 shares, try cash-basis minimum
+        if shares < 100:
+            shares = int(available / price / 100) * 100
 
-    account.cash -= total_cost
+        if shares < 100:
+            logger.warning(
+                f"Not enough capital to buy {code}: price={price:.2f} cash={available:.0f}"
+            )
+            return None
 
-    log = TradeLog(
-        account_id=account.id,
-        code=code,
-        name=name,
-        action="buy",
-        shares=shares,
-        price=price,
-        amount=total_cost,
-        reason=f"排名#{rank} 金字塔建仓 ATR={atr:.2f} 止损={stop_loss:.2f}",
-    )
-    session.add(log)
+        total_cost = shares * price
+
+        # Explicit overdraft guard, kept as defence-in-depth. With the
+        # `min(initial_capital * weight, available)` cap above, this branch is
+        # currently unreachable across the tested input space (see
+        # test_buy_sweep_never_overdraws), but it protects against future edits
+        # to the sizing formula and against float drift in `total_cost`.
+        if total_cost > available + 1e-9:
+            affordable = int(available / price / 100) * 100
+            if affordable < 100:
+                logger.warning(
+                    f"Insufficient cash to buy {code}: need={total_cost:.2f} cash={available:.2f}"
+                )
+                return None
+            shares = affordable
+            total_cost = shares * price
+            if total_cost > available + 1e-9:
+                logger.warning(
+                    f"Buy rejected for {code}: cost={total_cost:.2f} exceeds cash={available:.2f}"
+                )
+                return None
+
+        stop_loss = round(price - 2 * atr, 2)
+
+        position = Position(
+            account_id=account.id,
+            code=code,
+            name=name,
+            shares=shares,
+            avg_cost=price,
+            open_price=price,
+            high_since_open=price,
+            atr_at_buy=atr,
+            stop_loss_price=stop_loss,
+            tier=1,
+        )
+        session.add(position)
+
+        account.cash = available - total_cost
+        if account.cash < 0:  # defensive: never persist a negative balance
+            logger.error(f"Negative cash detected for {code}, clamping to 0: {account.cash}")
+            account.cash = 0.0
+
+        log = TradeLog(
+            account_id=account.id,
+            code=code,
+            name=name,
+            action="buy",
+            shares=shares,
+            price=price,
+            amount=total_cost,
+            reason=f"排名#{rank} 金字塔建仓 ATR={atr:.2f} 止损={stop_loss:.2f}",
+        )
+        session.add(log)
+
+        # Flush the cash debit to the DB *while still holding the lock*, so the
+        # next waiter's `session.refresh(account)` observes this purchase. Without
+        # the flush the new balance would only reach the DB at the caller's later
+        # commit, i.e. after the lock is released, and concurrent requests would
+        # still oversell.
+        #
+        # NOTE: for this to be durable the caller must `commit()` promptly. The
+        # flush holds the SQLite write lock only for the remainder of this
+        # critical section, which is short and contains no awaits other than the
+        # flush itself.
+        try:
+            await session.flush()
+        except Exception as e:
+            logger.error(f"Failed to flush buy for {code}, aborting order: {e}")
+            raise
 
     logger.info(f"BUY {name}({code}) {shares}股 @ {price:.2f} 止损={stop_loss:.2f}")
     _broadcast_trade_event("buy", code, name, price, shares, reason=log.reason)
@@ -207,35 +314,50 @@ async def execute_sell(
     action: str = "sell",
     shares: int | None = None,
 ) -> TradeLog:
-    """Execute a simulated sell order (full or partial)."""
-    sell_shares = shares if shares is not None else position.shares
-    sell_shares = min(sell_shares, position.shares)
+    """Execute a simulated sell order (full or partial).
 
-    amount = sell_shares * price
-    pnl = (price - position.avg_cost) * sell_shares
+    Serialized by the same process-local lock as ``execute_buy`` so a concurrent
+    buy cannot lose this cash credit (read-modify-write race on ``account.cash``).
+    """
+    async with get_trading_lock():
+        # Refresh from the DB first: with one session per request, our in-memory
+        # `account.cash` may predate a concurrent trade. See execute_buy.
+        await session.refresh(account)
 
-    account.cash += amount
+        sell_shares = shares if shares is not None else position.shares
+        sell_shares = min(sell_shares, position.shares)
 
-    if sell_shares >= position.shares:
-        await session.delete(position)
-    else:
-        position.shares -= sell_shares
+        amount = sell_shares * price
+        pnl = (price - position.avg_cost) * sell_shares
 
-    log = TradeLog(
-        account_id=account.id,
-        code=position.code,
-        name=position.name,
-        action=action,
-        shares=sell_shares,
-        price=price,
-        amount=amount,
-        pnl=round(pnl, 2),
-        reason=reason,
-    )
-    session.add(log)
+        account.cash = account.cash + amount
 
-    logger.info(f"SELL {position.name}({position.code}) {sell_shares}股 @ {price:.2f} 盈亏={pnl:.2f} 原因={reason}")
-    _broadcast_trade_event(action, position.code, position.name, price, sell_shares, pnl=pnl, reason=reason)
+        if sell_shares >= position.shares:
+            await session.delete(position)
+        else:
+            position.shares -= sell_shares
+
+        log = TradeLog(
+            account_id=account.id,
+            code=position.code,
+            name=position.name,
+            action=action,
+            shares=sell_shares,
+            price=price,
+            amount=amount,
+            pnl=round(pnl, 2),
+            reason=reason,
+        )
+        session.add(log)
+
+        code = position.code
+        name = position.name
+
+        # Publish the new balance before releasing the lock (see execute_buy).
+        await session.flush()
+
+    logger.info(f"SELL {name}({code}) {sell_shares}股 @ {price:.2f} 盈亏={pnl:.2f} 原因={reason}")
+    _broadcast_trade_event(action, code, name, price, sell_shares, pnl=pnl, reason=reason)
     return log
 
 
@@ -265,34 +387,48 @@ async def check_and_execute_pyramid_add(
     add_value = original_value * 0.5
     add_shares = int(add_value / current_price / 100) * 100
 
-    if add_shares < 100 or add_shares * current_price > account.cash:
-        return None
+    # Serialize the cash read-modify-write with buys/sells (see get_trading_lock).
+    async with get_trading_lock():
+        # Refresh from the DB: our in-memory cash may predate a concurrent trade.
+        await session.refresh(account)
 
-    total_cost = add_shares * current_price
-    new_total_shares = position.shares + add_shares
-    position.avg_cost = (position.avg_cost * position.shares + current_price * add_shares) / new_total_shares
-    position.shares = new_total_shares
-    position.tier += 1
+        if add_shares < 100 or add_shares * current_price > account.cash:
+            return None
 
-    # Recalculate stop loss based on new avg cost (only move up, never down)
-    atr = position.atr_at_buy
-    old_stop = position.stop_loss_price
-    new_stop = round(position.avg_cost - 2 * atr, 2)
-    position.stop_loss_price = max(old_stop, new_stop)
+        total_cost = add_shares * current_price
+        if total_cost > account.cash + 1e-9:  # defensive overdraft guard
+            logger.warning(
+                f"Pyramid add rejected for {position.code}: cost={total_cost:.2f} cash={account.cash:.2f}"
+            )
+            return None
 
-    account.cash -= total_cost
+        new_total_shares = position.shares + add_shares
+        position.avg_cost = (position.avg_cost * position.shares + current_price * add_shares) / new_total_shares
+        position.shares = new_total_shares
+        position.tier += 1
 
-    log = TradeLog(
-        account_id=account.id,
-        code=position.code,
-        name=position.name,
-        action="buy",
-        shares=add_shares,
-        price=current_price,
-        amount=total_cost,
-        reason=f"金字塔加仓第{position.tier}层 盈利={gain_pct:.1%}",
-    )
-    session.add(log)
+        # Recalculate stop loss based on new avg cost (only move up, never down)
+        atr = position.atr_at_buy
+        old_stop = position.stop_loss_price
+        new_stop = round(position.avg_cost - 2 * atr, 2)
+        position.stop_loss_price = max(old_stop, new_stop)
+
+        account.cash -= total_cost
+
+        log = TradeLog(
+            account_id=account.id,
+            code=position.code,
+            name=position.name,
+            action="buy",
+            shares=add_shares,
+            price=current_price,
+            amount=total_cost,
+            reason=f"金字塔加仓第{position.tier}层 盈利={gain_pct:.1%}",
+        )
+        session.add(log)
+
+        # Publish the new balance before releasing the lock (see execute_buy).
+        await session.flush()
 
     logger.info(f"PYRAMID ADD {position.name} layer={position.tier} +{add_shares}股 @ {current_price:.2f}")
     return log

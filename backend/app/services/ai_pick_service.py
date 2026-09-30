@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 from loguru import logger
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, or_, select
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
@@ -443,90 +443,202 @@ async def push_ai_pick_notification(pick_date: date, result: dict) -> bool:
 
     message = format_ai_pick_message(pick_date, result)
     from app.services.notification_service import send_wechat_work
-    return send_wechat_work(settings.wechat_webhook_url, message)
+    try:
+        return send_wechat_work(settings.wechat_webhook_url, message)
+    except Exception as exc:
+        # External push failure must not abort the AI pick task.
+        logger.error(f"AI pick notification failed for {pick_date}: {exc}")
+        return False
 
 
 # ======================================================================
 # Backtesting
 # ======================================================================
 
-async def _get_stock_close_on_date(code: str, target_date: date) -> float | None:
-    """Get a stock's close price on a specific date."""
+async def _get_stock_ohlc_on_date(code: str, target_date: date) -> tuple[float | None, float | None]:
+    """Get a stock's (open, close) prices on one exact trading date.
+
+    Single responsibility: exact-date lookup. Returns (None, None) when the stock
+    has no StockDaily row for ``target_date`` (suspended / non-trading day).
+    Callers that need "the next trading day" must resolve the date first via
+    ``_get_next_trading_date`` instead of adding ``timedelta(days=1)``.
+    """
     async with AsyncSessionLocal() as session:
-        stmt = select(StockDaily.close).where(
+        stmt = select(StockDaily.open, StockDaily.close).where(
             StockDaily.code == code,
             StockDaily.trade_date == target_date,
         )
         result = await session.execute(stmt)
-        return result.scalar_one_or_none()
+        row = result.first()
+        if row:
+            return row[0], row[1]
+        return None, None
+
+
+async def _get_next_trading_date(session, code: str, trade_date: date) -> date | None:
+    """Resolve the first real trading day strictly after ``trade_date`` for ``code``.
+
+    Trading days are derived from the rows actually present in ``StockDaily`` — the
+    calendar has no holidays/weekends. Returns ``None`` when no later trading day
+    exists yet (e.g. the pick was made on the most recent trading day), in which
+    case the caller must leave the pick untouched so a later run can retry it.
+    """
+    stmt = select(func.min(StockDaily.trade_date)).where(
+        StockDaily.code == code,
+        StockDaily.trade_date > trade_date,
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _get_pick_day_close(session, code: str, pick_date: date) -> float | None:
+    """Close price of the pick day itself (or the nearest earlier trading day).
+
+    ``AIPick.price_at_pick`` means "price when the pick was made" and is used for
+    return attribution, so it must never be filled with the *next* day's open.
+    """
+    stmt = (
+        select(StockDaily.close)
+        .where(StockDaily.code == code, StockDaily.trade_date <= pick_date)
+        .order_by(desc(StockDaily.trade_date))
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _load_pending_picks(session, *conditions) -> list[AIPick]:
+    """Load current picks matching ``conditions``, oldest first."""
+    stmt = select(AIPick).where(*conditions).order_by(AIPick.pick_date, AIPick.id)
+    return list((await session.execute(stmt)).scalars().all())
 
 
 async def backtest_ai_picks_open() -> int:
-    """Fill next_day_open for picks made on the most recent pick_date."""
+    """Fill ``next_day_open`` (and backfill ``price_at_pick``) for pending picks.
+
+    Trading day = next ``StockDaily`` row after the pick date (Friday → Monday).
+    Only the reference open price is written here; close / change_pct / backtest_at
+    are owned by :func:`backtest_ai_picks_close` so the two jobs never race on the
+    same columns.
+
+    Idempotent and order independent: the pick is selected while *either* of the
+    two columns it fills is still NULL (so a run of ``backtest_close`` first does
+    not permanently strand ``price_at_pick``), and a pick with no later trading day
+    is left untouched for a future retry.
+    """
     async with AsyncSessionLocal() as session:
-        stmt = select(AIPick.pick_date).order_by(AIPick.pick_date.desc()).limit(1)
-        latest = (await session.execute(stmt)).scalar_one_or_none()
-        if not latest:
-            logger.debug("No AI picks to backtest (open)")
+        picks = await _load_pending_picks(
+            session,
+            or_(
+                AIPick.next_day_open.is_(None),
+                AIPick.price_at_pick.is_(None),
+            ),
+        )
+        if not picks:
             return 0
 
-        stmt = select(AIPick).where(
-            AIPick.pick_date == latest,
-            AIPick.next_day_open.is_(None),
-        )
-        result = await session.execute(stmt)
-        picks = result.scalars().all()
-
-        updated = 0
-        today = date.today()
+        open_updated = 0
         for pick in picks:
-            open_price = await _get_stock_close_on_date(pick.code, today)
-            if open_price is not None:
-                pick.next_day_open = open_price
-                # Also fill price_at_pick if not set
-                if pick.price_at_pick is None:
-                    pick.price_at_pick = open_price
-                updated += 1
+            next_day = await _get_next_trading_date(session, pick.code, pick.pick_date)
+            if next_day is None:
+                # No later trading day yet — leave the row pending, retry next run.
+                logger.debug(
+                    f"Backtest open: no trading day after {pick.pick_date} for "
+                    f"{pick.code}, will retry later"
+                )
+                continue
 
-        if updated:
+            open_p, _ = await _get_stock_ohlc_on_date(pick.code, next_day)
+            if open_p is None:
+                logger.warning(
+                    f"Backtest open: {pick.code} has no quote on trading day {next_day}"
+                )
+                continue
+
+            pick.next_day_open = open_p
+            open_updated += 1
+
+        # price_at_pick is backfilled independently of next_day_open: the two jobs
+        # may run in any order (backtest_close writes next_day_open first), and a
+        # pick whose reference price is still missing must not be skipped just
+        # because its open price was already stored.
+        price_backfilled = 0
+        for pick in picks:
+            if pick.price_at_pick is not None:
+                continue
+            # price_at_pick = 选股当日(或最近可用交易日)的收盘价, i.e. the price the
+            # pick was based on. Never the next day's open.
+            close_at_pick = await _get_pick_day_close(session, pick.code, pick.pick_date)
+            if close_at_pick is not None:
+                pick.price_at_pick = close_at_pick
+                price_backfilled += 1
+            else:
+                logger.warning(
+                    f"Backtest open: no close price on/before {pick.pick_date} "
+                    f"for {pick.code}, price_at_pick left NULL"
+                )
+
+        if open_updated or price_backfilled:
             await session.commit()
-            logger.info(f"Backtest open: updated {updated}/{len(picks)} picks for {latest}")
-        return updated
+            logger.info(
+                f"Backtest open: {open_updated}/{len(picks)} open prices, "
+                f"{price_backfilled} price_at_pick backfilled"
+            )
+        # Return value keeps its original meaning: number of picks whose next-day
+        # open price was resolved in this run.
+        return open_updated
 
 
 async def backtest_ai_picks_close() -> int:
-    """Fill next_day_close + change_pct for picks on the most recent pick_date."""
+    """Fill ``next_day_close`` / ``next_day_change_pct`` / ``backtest_at``.
+
+    ``next_day_change_pct`` is the intraday return of the *next* trading day
+    (next-day close vs next-day open, both aggregated here). It is written once
+    and then the row stops being selected, so repeated runs cannot double count
+    or recompute it from a stale open. Picks whose next trading day has no quote
+    yet stay pending and are retried on the next run.
+    """
     async with AsyncSessionLocal() as session:
-        stmt = select(AIPick.pick_date).order_by(AIPick.pick_date.desc()).limit(1)
-        latest = (await session.execute(stmt)).scalar_one_or_none()
-        if not latest:
-            logger.debug("No AI picks to backtest (close)")
+        picks = await _load_pending_picks(session, AIPick.next_day_close.is_(None))
+        if not picks:
             return 0
 
-        stmt = select(AIPick).where(
-            AIPick.pick_date == latest,
-            AIPick.next_day_close.is_(None),
-        )
-        result = await session.execute(stmt)
-        picks = result.scalars().all()
-
         updated = 0
-        today = date.today()
         for pick in picks:
-            close_price = await _get_stock_close_on_date(pick.code, today)
-            if close_price is None:
-                continue
-            pick.next_day_close = close_price
-            pick.backtest_at = datetime.now()
-            if pick.next_day_open and pick.next_day_open > 0:
-                pick.next_day_change_pct = round(
-                    (close_price - pick.next_day_open) / pick.next_day_open * 100, 2
+            next_day = await _get_next_trading_date(session, pick.code, pick.pick_date)
+            if next_day is None:
+                logger.debug(
+                    f"Backtest close: no trading day after {pick.pick_date} for "
+                    f"{pick.code}, will retry later"
                 )
+                continue
+
+            # Prefer the open captured by backtest_ai_picks_open; fall back to the
+            # quote of the same trading day when that job has not run yet.
+            open_p, close_p = await _get_stock_ohlc_on_date(pick.code, next_day)
+            if close_p is None:
+                logger.warning(
+                    f"Backtest close: {pick.code} has no quote on trading day {next_day}"
+                )
+                continue
+
+            pick.next_day_close = close_p
+            reference_open = pick.next_day_open if pick.next_day_open else open_p
+            if reference_open:
+                pick.next_day_change_pct = round(
+                    (close_p - reference_open) / reference_open * 100, 2
+                )
+            else:
+                logger.warning(
+                    f"Backtest close: no reference open for {pick.code} on {next_day}, "
+                    "next_day_change_pct left NULL"
+                )
+            if pick.next_day_open is None and open_p is not None:
+                pick.next_day_open = open_p
+            pick.backtest_at = datetime.now()
             updated += 1
 
         if updated:
             await session.commit()
-            logger.info(f"Backtest close: updated {updated}/{len(picks)} picks for {latest}")
+            logger.info(f"Backtest close: updated {updated}/{len(picks)} picks")
         return updated
 
 
@@ -557,4 +669,5 @@ async def run_ai_pick_task() -> None:
 
         logger.info(f"AI pick task completed: {saved} picks saved")
     except Exception as exc:
-        logger.error(f"AI pick task failed: {exc}")
+        # Never let a notification/API failure kill the scheduled job.
+        logger.exception(f"AI pick task failed: {exc}")

@@ -1,0 +1,58 @@
+# Alembic migrations for QuantBlade
+
+Single-database migration setup for the backend (SQLite via aiosqlite in the
+app, plain `sqlite://` driver for migrations).
+
+## Commands (run from `backend/`)
+
+```bash
+# Apply all migrations to the configured database
+.venv/bin/python -m alembic upgrade head
+
+# Roll everything back
+.venv/bin/python -m alembic downgrade base
+
+# Create a new revision from model changes
+.venv/bin/python -m alembic revision --autogenerate -m "describe change"
+
+# Show current revision
+.venv/bin/python -m alembic current
+```
+
+> **Always use `python -m alembic`, not `.venv/bin/alembic`.**
+> This virtualenv was created at an older path
+> (`/Users/lxxxx/Desktop/作业/智能选股/backend/.venv`), so every console script
+> in `.venv/bin/` has a stale shebang and fails with
+> `bad interpreter: No such file or directory`. The module form always works.
+> The same applies to `.venv/bin/pytest` — use `.venv/bin/python -m pytest`.
+
+## Existing databases (important)
+
+The baseline targets **fresh** databases. A database that was already created by
+`Base.metadata.create_all` (e.g. the in-use `stock_picker.db`) must be **stamped**
+rather than upgraded, so Alembic records the baseline as already applied:
+
+```bash
+.venv/bin/python -m alembic stamp head
+```
+
+`upgrade()` is idempotent — it skips tables and indexes that already exist — so an
+accidental `upgrade head` against a populated schema will not fail or lose data,
+but stamping is still the correct operation.
+
+## Database URL resolution
+
+`env.py` resolves the URL in this order:
+
+1. `-x db_url=...` command-line option
+2. `DATABASE_URL` environment variable
+3. `settings.database_url` from `app/core/config.py` (i.e. `backend/.env`)
+
+The async driver prefix (`sqlite+aiosqlite://`) is transparently rewritten to
+the synchronous `sqlite://` driver, because migrations run synchronously.
+
+## Baseline
+
+`versions/0001_baseline_initial_schema.py` is the baseline that creates every
+table defined in `app/models/`. See the header of that file for the exact table
+list.

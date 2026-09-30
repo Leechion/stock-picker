@@ -6,15 +6,16 @@ Endpoints:
   POST /api/factors/compute    - Compute factors for all stocks
 """
 
+from datetime import date
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.cache import cache, cached
+from app.core.cache import cached
 from app.models.stock import FactorType, FactorValue, StockInfo
-from app.services.factor_engine import compute_all_factors
 from app.services.factor_config import FACTOR_CONFIG
 
 router = APIRouter()
@@ -99,39 +100,47 @@ async def get_factor_groups():
 
 @router.post("/factors/compute")
 async def compute_factors(
-    session: AsyncSession = Depends(get_db),
+    trading_date: date = Query(default=None),
+    concurrency: int = Query(default=12, ge=1, le=32),
 ):
-    """Compute factors for all stocks (triggers factor recomputation + ranking)."""
-    from datetime import date
+    """Launch the factor + ranking pipeline as a background job.
 
-    try:
-        # Step 1: compute factors for all stocks
-        from app.services.data_service import get_history
+    This endpoint used to run the whole computation INLINE, one stock at a time:
 
-        result = await session.execute(select(StockInfo.code))
-        codes = list(result.scalars().all())
-
-        count = 0
-        for code in codes:
+        for code in codes:                       # ~3200 stocks, strictly serial
             df = await get_history(session, code, days=80)
-            if not df.empty:
-                await compute_all_factors(session, code, df)
-                count += 1
+            await compute_all_factors(session, code, df)
 
-        # Step 2: compute rankings for ALL strategies
-        from app.services.ranking_service import compute_all_rankings
-        ranking_result = await compute_all_rankings(session, date.today())
+    That is the third divergent copy of this pipeline (the others being
+    ``/rankings/compute`` and the scheduler). It was the slowest of the three —
+    no concurrency whatsoever — and, like the others, blocked the HTTP request
+    for its entire duration with no progress reporting.
 
-        # Invalidate factor and ranking caches
-        cache.invalidate("factors")
-        cache.invalidate("ranking_")
+    It now delegates to ``app.pipelines`` and returns a ``job_id`` immediately.
+    """
+    from app.core.jobs import launch
 
-        return _ok({
-            "status": "success",
-            "message": f"Computed factors for {count} stocks",
-            "stocks_computed": count,
-            "ranking": ranking_result,
-        })
-    except Exception as e:
-        await session.rollback()
-        return _err(f"Factor computation failed: {e}", 500)
+    target = trading_date or date.today()
+
+    async def _run(ctx):
+        from app.pipelines import run_full_ranking_pipeline
+
+        return await run_full_ranking_pipeline(
+            ctx, trading_date=target, concurrency=concurrency
+        )
+
+    job_id = await launch(
+        "full_ranking",
+        _run,
+        {"trading_date": str(target), "concurrency": concurrency, "source": "factors"},
+    )
+    return _ok(
+        {
+            "job_id": job_id,
+            "job_type": "full_ranking",
+            "status": "pending",
+            "trading_date": str(target),
+            "poll_url": f"/api/jobs/{job_id}",
+        },
+        "任务已启动",
+    )

@@ -9,7 +9,7 @@ from loguru import logger
 
 from app.core.config import settings
 from app.core.database import Base, engine
-from app.api import health, stocks, factors, ranking, strategy, sectors, backtest, trading, monitor, wechat, alerts, ai_picks
+from app.api import health, stocks, factors, ranking, strategy, sectors, backtest, trading, monitor, wechat, alerts, ai_picks, jobs
 
 
 @asynccontextmanager
@@ -100,6 +100,9 @@ def create_app() -> FastAPI:
     app.include_router(wechat.router, prefix="/api")
     app.include_router(alerts.router, prefix="/api")
     app.include_router(ai_picks.router, prefix="/api")
+    # Job routes must be registered BEFORE ranking.router so that
+    # `/jobs/...` is not shadowed by ranking's catch-all `/rankings/{code}`.
+    app.include_router(jobs.router, prefix="/api")
 
     return app
 

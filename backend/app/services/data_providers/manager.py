@@ -17,10 +17,10 @@ class ProviderManager:
 
     def __init__(self) -> None:
         self._providers: list[DataProvider] = [
+            AKShareProvider(),
             THSProvider(),
             SinaProvider(),
             EastmoneyProvider(),
-            AKShareProvider(),
         ]
 
     @property

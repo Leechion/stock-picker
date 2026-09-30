@@ -1,13 +1,10 @@
 from datetime import date
 
-import pandas as pd
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
 
 from app.core.database import AsyncSessionLocal
-from app.models.stock import StockInfo
-from app.services.data_service import sync_all_stocks, get_history, sync_fundamentals
-from app.services.factor_engine import compute_all_factors
+from app.services.data_service import sync_all_stocks, sync_fundamentals
 from app.services.notification_service import send_daily_notification
 from app.services.ai_pick_service import run_ai_pick_task, backtest_ai_picks_open, backtest_ai_picks_close
 
@@ -25,122 +22,31 @@ async def run_daily_sync() -> None:
 
 
 async def run_daily_ranking() -> None:
+    """Scheduled factor + ranking + alert run.
+
+    Delegates to the shared pipeline instead of re-implementing the sequence.
+    This function previously carried its own copy of the pipeline, which had
+    drifted from the identical copy in ``app/api/ranking.py`` — the API copy
+    shared one ``AsyncSession`` across workers and crashed, while this one had
+    been fixed. One implementation, one place to fix.
+
+    Failures are logged and swallowed because a scheduler job must not raise
+    into APScheduler.
+    """
     logger.info("Starting daily ranking computation")
-    async with AsyncSessionLocal() as session:
-        try:
-            # Step 1: Load all stock codes (exclude ST and price > 100)
-            from sqlalchemy import select
-            from app.services.ranking_service import get_eligible_codes
-            eligible = await get_eligible_codes(session)
-            codes = sorted(eligible)
-            logger.info(f"Eligible stocks for ranking: {len(codes)} (excluded ST & price>100)")
+    from app.core.jobs import JobContext
+    from app.pipelines import run_full_ranking_pipeline
 
-            # Step 2: Compute factors for each stock (concurrent)
-            import asyncio
-            from app.services.capital_flow import fetch_flow_and_chip
-            from app.services.factor_engine import compute_factors_for_stock
-            from app.models.stock import StockFundamental, FactorValue, StockInfo as SI
-            from sqlalchemy import delete as sql_delete, insert, func
-
-            sem = asyncio.Semaphore(20)
-
-            # Pre-load sector heat map
-            sector_heat_map: dict[str, float] = {}
-            try:
-                from app.services import sector_service
-                loop = asyncio.get_running_loop()
-                sectors = await loop.run_in_executor(None, sector_service.fetch_sector_performance)
-                if sectors:
-                    sector_heat_map = await loop.run_in_executor(None, sector_service.compute_sector_heat, sectors)
-            except Exception:
-                pass
-
-            # Pre-load all fundamentals and industries in one query
-            fund_rows = (await session.execute(select(StockFundamental))).scalars().all()
-            fund_map = {r.code: r for r in fund_rows}
-
-            info_rows = (await session.execute(select(SI.code, SI.industry))).all()
-            industry_map = {code: ind for code, ind in info_rows}
-
-            async def process_one(code: str) -> list[dict]:
-                async with sem:
-                    df = await get_history(session, code, days=80)
-                    if df.empty:
-                        return []
-
-                    loop = asyncio.get_running_loop()
-                    flow_data = await loop.run_in_executor(None, lambda c=code: fetch_flow_and_chip(c))
-
-                    fundamentals = None
-                    fr = fund_map.get(code)
-                    if fr:
-                        fundamentals = {
-                            "pe_ttm": fr.pe_ttm, "pb": fr.pb, "roe": fr.roe,
-                            "revenue_growth": fr.revenue_growth,
-                            "profit_growth": fr.profit_growth,
-                            "debt_ratio": fr.debt_ratio,
-                        }
-
-                    sector_heat = sector_heat_map.get(industry_map.get(code, ""))
-                    raw = compute_factors_for_stock(df, code, fundamentals, flow_data, sector_heat)
-                    return raw
-
-            tasks = [process_one(code) for code in codes]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            # Batch insert factor values
-            now = pd.Timestamp.now()
-            all_records = []
-            computed = 0
-            for i, raw in enumerate(results):
-                if isinstance(raw, Exception):
-                    logger.debug(f"Factor compute failed for {codes[i]}: {raw}")
-                    continue
-                if not raw:
-                    continue
-                for f in raw:
-                    all_records.append({
-                        "code": codes[i],
-                        "factor_name": f["factor_name"],
-                        "factor_type": f["factor_type"],
-                        "value": f["value"],
-                        "computed_at": now,
-                    })
-                computed += 1
-
-            # Delete old factors and batch insert new (only if we have new data)
-            if all_records:
-                await session.execute(sql_delete(FactorValue))
-                for i in range(0, len(all_records), 500):
-                    await session.execute(insert(FactorValue), all_records[i:i + 500])
-                await session.commit()
-            else:
-                logger.warning("No factor records computed, skipping delete/insert")
-
-            logger.info(f"Factors computed: {computed}/{len(codes)} stocks")
-
-            # Step 3: Compute rankings for all strategies
-            from app.services.ranking_service import compute_all_rankings
-            ranking_result = await compute_all_rankings(session, date.today())
-            logger.info(f"Daily ranking: {ranking_result.get('stocks_computed', 0)} stocks ranked")
-
-            # Step 4: Check alert rules
-            from app.services.alert_service import check_alerts, format_alert_message
-            triggers = await check_alerts(session)
-            if triggers:
-                logger.info(f"Alert triggers: {len(triggers)}")
-                message = format_alert_message(triggers)
-                if message:
-                    from app.services.notification_service import send_wechat_work
-                    from app.core.config import settings
-                    send_wechat_work(settings.wechat_webhook_url, message)
-            else:
-                logger.info("No alert triggers")
-
-        except Exception as e:
-            await session.rollback()
-            logger.error(f"Daily ranking failed: {e}")
-
+    ctx = JobContext(job_id=0, job_type="scheduled_ranking", params={})
+    try:
+        result = await run_full_ranking_pipeline(ctx, trading_date=date.today())
+        logger.info(
+            f"Daily ranking: {result['rankings'].get('stocks_computed', 0)} stocks ranked, "
+            f"{result['factors'].get('factors_written', 0)} factor rows, "
+            f"{result['alerts_triggered']} alerts"
+        )
+    except Exception as e:
+        logger.error(f"Daily ranking failed: {e}")
 
 async def run_pre_market_check() -> None:
     """Pre-market check: plan buys/sells based on rankings."""

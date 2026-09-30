@@ -10,13 +10,19 @@ from datetime import date
 import numpy as np
 import pandas as pd
 from loguru import logger
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy import delete as sql_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.stock import FactorValue, StockRanking, StockInfo, StockDaily
 from app.services.factor_config import CATEGORY_WEIGHTS, FACTOR_CONFIG
 from app.services.strategy_loader import strategy_loader
+
+# Upper bound on the number of candidate stock codes fed into a single
+# `IN (...)` clause when resolving a search term. SQLite's default
+# SQLITE_MAX_VARIABLE_NUMBER is 999, so anything above that risks a runtime
+# "too many SQL variables" error once the list is expanded into bind params.
+MAX_SEARCH_CANDIDATES = 900
 
 
 async def get_eligible_codes(session: AsyncSession) -> set[str]:
@@ -324,8 +330,15 @@ async def get_ranking_list(
     page: int = 1,
     page_size: int = 50,
     strategy: str | None = None,
+    search: str | None = None,
 ) -> tuple[list[dict], int]:
     """Get paginated ranking list.
+
+    Parameters
+    ----------
+    search : str | None
+        If provided, filter rankings by stock code or name (fuzzy match).
+        Blank / whitespace-only values are treated as "no search".
 
     Returns
     -------
@@ -336,6 +349,33 @@ async def get_ranking_list(
         strategy = strategy_loader.active_name
 
     base_filter = (StockRanking.rank_date == trading_date) & (StockRanking.strategy == strategy)
+
+    # Resolve search to candidate codes.
+    # Normalise first: "" and all-whitespace must behave like "no search" rather
+    # than running a LIKE '%%' full-table scan.
+    search = search.strip() if search else None
+    candidate_codes: list[str] | None = None
+    if search:
+        # NOTE: always use or_(...) and never `A | B`.
+        # Python evaluates `&` before `|`, so `base_filter & A | B` silently becomes
+        # `(base_filter & A) | B`, which lets rows bypass the date/strategy filter
+        # (data leak). or_() keeps the OR as a single parenthesised group.
+        candidate_stmt = select(StockInfo.code).where(
+            or_(StockInfo.code.contains(search), StockInfo.name.contains(search))
+        )
+        candidate_result = await session.execute(candidate_stmt)
+        candidate_codes = [row[0] for row in candidate_result.all()]
+        if not candidate_codes:
+            return [], 0
+        # Guard the IN clause: SQLite's default limit is 999 bound parameters.
+        # Truncate deterministically (sorted) so the query can never blow up.
+        if len(candidate_codes) > MAX_SEARCH_CANDIDATES:
+            logger.warning(
+                "Search {!r} matched {} codes; truncating to {} to stay within the SQL IN-clause limit",
+                search, len(candidate_codes), MAX_SEARCH_CANDIDATES,
+            )
+            candidate_codes = sorted(candidate_codes)[:MAX_SEARCH_CANDIDATES]
+        base_filter = base_filter & (StockRanking.code.in_(candidate_codes))
 
     count_stmt = select(func.count(StockRanking.id)).where(base_filter)
     count_result = await session.execute(count_stmt)

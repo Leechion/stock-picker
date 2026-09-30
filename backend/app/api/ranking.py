@@ -29,19 +29,30 @@ def _err(message, code=400):
     return JSONResponse({"code": code, "message": message, "data": None}, status_code=code)
 
 
+# NOTE: deliberately NOT decorated with @cached(ttl=300).
+# 1) The cache key was built from the request path/params but did not include
+#    `strategy`, so requests for different strategies collided and returned each
+#    other's data. Caching here is a correctness hazard while the key is
+#    incomplete.
+# 2) Adding the `search` parameter makes the key space essentially unbounded
+#    (arbitrary user-typed substrings), so a TTL cache would be pure churn.
+# 3) Ranking rows change once per trading day (and on every /rankings/compute),
+#    so a 300s TTL buys almost nothing for the correctness risk it adds.
+# Do not re-add the decorator without extending the key to cover every filter
+# parameter (date, strategy, search, page, page_size).
 @router.get("/rankings/")
-@cached(ttl=300, prefix="ranking_list")
 async def get_rankings(
     trading_date: date = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
     strategy: str = Query(default=None),
+    search: str = Query(default=None, description="搜索股票代码或名称"),
     session: AsyncSession = Depends(get_db),
 ):
     target_date = trading_date or date.today()
 
     from app.services.ranking_service import get_ranking_list
-    records, total = await get_ranking_list(session, target_date, page, page_size, strategy=strategy)
+    records, total = await get_ranking_list(session, target_date, page, page_size, strategy=strategy, search=search)
 
     return _ok({
         "items": records,
@@ -96,103 +107,48 @@ async def get_stock_rank_endpoint(
 @router.post("/rankings/compute")
 async def compute_ranking(
     trading_date: date = Query(default=None),
-    session: AsyncSession = Depends(get_db),
+    concurrency: int = Query(default=12, ge=1, le=32),
 ):
-    """Run full pipeline: compute factors for all stocks → compute rankings."""
-    import asyncio
-    from app.services.factor_engine import compute_factors_for_stock
-    from app.services.data_service import get_history
-    from app.models.stock import StockInfo, FactorValue, StockFundamental
-    from sqlalchemy import delete as sql_delete, insert
+    """Launch the full factor → ranking → alert pipeline as a background job.
 
-    # Filter: exclude ST stocks and price > 100
-    from app.services.ranking_service import get_eligible_codes
-    eligible = await get_eligible_codes(session)
+    This endpoint deliberately does **not** run the pipeline inline. It used to,
+    which meant a ~16 minute computation held the HTTP connection open, blocked
+    the frontend's 30s axios timeout, reported no progress, and could not be
+    cancelled. The pipeline was also duplicated here and in the scheduler.
 
-    result = await session.execute(select(StockInfo.code, StockInfo.industry))
-    stocks = [(code, ind) for code, ind in result.all() if code in eligible]
-    if not stocks:
-        return _err("No eligible stocks found", 400)
+    It now returns a ``job_id`` immediately. Track it with:
 
-    codes = [row[0] for row in stocks]
-    industry_map = {row[0]: row[1] for row in stocks}
+    * ``GET  /api/jobs/{job_id}``         — poll status and progress
+    * ``POST /api/jobs/{job_id}/cancel``  — cooperative cancellation
+    * WebSocket channel ``job_progress``  — live push
+    """
+    from app.core.jobs import launch
 
-    try:
-        from app.services.capital_flow import fetch_flow_and_chip
-        from app.services.sector_service import fetch_sector_performance, compute_sector_heat
-        import pandas as pd
+    target = trading_date or date.today()
 
-        # Pre-fetch sector heat once
-        try:
-            sectors = await asyncio.get_running_loop().run_in_executor(None, fetch_sector_performance)
-            sector_heat_scores = compute_sector_heat(sectors) if sectors else {}
-        except Exception:
-            sector_heat_scores = {}
+    async def _run(ctx):
+        from app.pipelines import run_full_ranking_pipeline
 
-        # Load all fundamentals in one query
-        fund_result = await session.execute(select(StockFundamental))
-        fund_map = {}
-        for fr in fund_result.scalars().all():
-            fund_map[fr.code] = {
-                "pe_ttm": fr.pe_ttm, "pb": fr.pb, "roe": fr.roe,
-                "revenue_growth": fr.revenue_growth, "profit_growth": fr.profit_growth,
-                "debt_ratio": fr.debt_ratio,
-            }
+        return await run_full_ranking_pipeline(
+            ctx, trading_date=target, concurrency=concurrency
+        )
 
-        # Concurrent factor computation with semaphore
-        sem = asyncio.Semaphore(10)
-        total = 0
-        all_records = []
-
-        async def process_stock(code: str):
-            nonlocal total
-            async with sem:
-                df = await get_history(session, code, days=80)
-                if df.empty:
-                    return
-
-                loop = asyncio.get_running_loop()
-                flow_data = await loop.run_in_executor(None, lambda c=code: fetch_flow_and_chip(c))
-
-                sector_heat = sector_heat_scores.get(industry_map.get(code, ""), None)
-                raw_factors = compute_factors_for_stock(
-                    df, code, fund_map.get(code), flow_data, sector_heat,
-                )
-                if raw_factors:
-                    now = pd.Timestamp.now()
-                    for f in raw_factors:
-                        all_records.append({
-                            "code": code, "factor_name": f["factor_name"],
-                            "factor_type": f["factor_type"], "value": f["value"],
-                            "computed_at": now,
-                        })
-                    total += 1
-
-        await asyncio.gather(*[process_stock(c) for c in codes])
-
-        # Batch delete + insert (only if we have new data)
-        if all_records:
-            await session.execute(sql_delete(FactorValue))
-            for i in range(0, len(all_records), 500):
-                await session.execute(insert(FactorValue), all_records[i:i + 500])
-            await session.commit()
-        else:
-            logger.warning("No factor records computed, skipping delete/insert")
-
-        target = trading_date or date.today()
-        from app.services.ranking_service import compute_all_rankings
-        rank_result = await compute_all_rankings(session, target)
-        cache.invalidate("ranking_")
-
-        return _ok({
-            "total": total,
-            "updated_at": str(target),
-            "status": "success",
-            **rank_result,
-        })
-    except Exception as e:
-        await session.rollback()
-        return _err(f"Ranking computation failed: {e}", 500)
+    job_id = await launch(
+        "full_ranking",
+        _run,
+        {"trading_date": str(target), "concurrency": concurrency},
+    )
+    return _ok(
+        {
+            "job_id": job_id,
+            "job_type": "full_ranking",
+            "status": "pending",
+            "trading_date": str(target),
+            "concurrency": concurrency,
+            "poll_url": f"/api/jobs/{job_id}",
+        },
+        "任务已启动",
+    )
 
 
 @router.post("/notifications/test")
