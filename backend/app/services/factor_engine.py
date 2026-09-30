@@ -24,6 +24,11 @@ from app.models.stock import (
     StockRanking,
     StockDaily,
 )
+from app.services.derived_metrics import (
+    compute_derived_flow,
+    score_capital_flow_proxy,
+    score_chip_concentration_proxy,
+)
 from app.services.factor_config import (
     CATEGORY_WEIGHTS,
     FACTOR_CONFIG,
@@ -312,6 +317,7 @@ def compute_factors_for_stock(
     fundamentals: dict[str, float | None] | None = None,
     flow_data: dict[str, float | None] | None = None,
     sector_heat: float | None = None,
+    quote: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Compute all raw factor values for a single stock.
 
@@ -328,6 +334,11 @@ def compute_factors_for_stock(
         ``{main_net_ratio, chip_concentration, profit_ratio}`` from Eastmoney.
     sector_heat : float | None
         Sector heat score (0-100) for this stock's industry.
+    quote : dict | None
+        Today's realtime quote, if available. When the real Eastmoney
+        order-flow/chip data is missing (its hosts are blocked or the report
+        was retired), these derived metrics stand in so the sentiment factors
+        carry real information instead of collapsing to a constant 0.0.
 
     Returns
     -------
@@ -422,17 +433,40 @@ def compute_factors_for_stock(
         "value": _capital_flow_score(close, volume, high, low),
     })
 
-    # Real capital flow (from Eastmoney money flow data)
+    # Capital flow + chip concentration.
+    #
+    # Prefer the real Eastmoney figures. When they are absent — which is the
+    # normal case here, since push2.eastmoney.com is blocked on this network
+    # and the RPT_COST_CONC report was retired — fall back to locally derived
+    # proxies rather than emitting a constant 0.0. A constant contributes
+    # nothing after Z-scoring, so three of nineteen factors were dead weight.
     flow = flow_data or {}
+    derived = compute_derived_flow(df, quote)
+
+    main_net_ratio = flow.get("main_net_ratio")
+    if main_net_ratio is not None:
+        flow_score = _real_capital_flow_score(main_net_ratio)
+    else:
+        flow_score = score_capital_flow_proxy(
+            derived.volume_ratio, derived.close_strength
+        )
     raw_factors.append({
         "factor_name": "real_capital_flow_score",
         "factor_type": FactorType.SENTIMENT,
-        "value": _real_capital_flow_score(flow.get("main_net_ratio")),
+        "value": flow_score,
     })
+
+    concentration = flow.get("chip_concentration")
+    if concentration is not None:
+        chip_score = _chip_concentration_score(concentration, flow.get("profit_ratio"))
+    else:
+        chip_score = score_chip_concentration_proxy(
+            derived.volume_ratio, derived.turnover_rate, derived.close_strength
+        )
     raw_factors.append({
         "factor_name": "chip_concentration_score",
         "factor_type": FactorType.SENTIMENT,
-        "value": _chip_concentration_score(flow.get("chip_concentration"), flow.get("profit_ratio")),
+        "value": chip_score,
     })
 
     # Sector heat score (how hot is this stock's industry)

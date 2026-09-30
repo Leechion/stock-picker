@@ -49,7 +49,25 @@ async def job_db(monkeypatch):
     monkeypatch.setattr(jobs_mod, "AsyncSessionLocal", factory)
     # Progress broadcast needs a running loop; stub it so tests are deterministic.
     monkeypatch.setattr(jobs_mod, "_broadcast_job", lambda payload: None)
+
+    # The cancel-event / task registries are MODULE-LEVEL. Without clearing
+    # them, a job launched by one test keeps running into the next one, where
+    # it competes for the event loop and occasionally starves that test's own
+    # job until its timeout (~5s). Observed as a flake that moved between
+    # tests and only appeared in the full suite.
+    jobs_mod._cancel_events.clear()
+    jobs_mod._running_tasks.clear()
+
     yield factory
+
+    # Drain anything still running before tearing the engine down.
+    pending = [t for t in jobs_mod._running_tasks.values() if not t.done()]
+    for t in pending:
+        t.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    jobs_mod._cancel_events.clear()
+    jobs_mod._running_tasks.clear()
     await engine.dispose()
 
 

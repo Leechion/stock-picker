@@ -41,6 +41,37 @@ INSERT_CHUNK = 500
 HISTORY_DAYS = 80
 
 
+#: Cached verdict on whether the upstream flow/chip sources are usable.
+#: Re-evaluated periodically so a network change is picked up without a restart.
+_flow_dead_checked_at: float = 0.0
+_FLOW_DEAD_TTL = 600.0
+
+
+def _flow_sources_dead() -> bool:
+    """True when neither Eastmoney flow nor chip data can be fetched."""
+    global _flow_dead_checked_at
+    import time
+
+    now = time.monotonic()
+    if now - _flow_dead_checked_at < _FLOW_DEAD_TTL and _flow_dead_checked_at > 0:
+        return _FLOW_DEAD_CACHED
+
+    from app.services.capital_flow import both_sources_unavailable
+
+    dead = both_sources_unavailable()
+    if dead:
+        logger.info(
+            "Capital-flow sources unavailable; using derived metrics for the "
+            "whole run (skipping per-stock fetches)"
+        )
+    globals()["_FLOW_DEAD_CACHED"] = dead
+    _flow_dead_checked_at = now
+    return dead
+
+
+_FLOW_DEAD_CACHED: bool = False
+
+
 async def _load_universe() -> tuple[list[str], dict[str, str | None], dict[str, dict]]:
     """Pre-load the read-only inputs once, before any concurrency starts.
 
@@ -71,8 +102,21 @@ async def _load_universe() -> tuple[list[str], dict[str, str | None], dict[str, 
     return codes, industry_map, fund_map
 
 
-async def _load_sector_heat() -> dict[str, float]:
-    """Best-effort sector heat map; failure degrades to an empty map."""
+async def _load_sector_heat(
+    industry_map: dict[str, str | None] | None = None,
+    quotes: dict[str, Any] | None = None,
+) -> dict[str, float]:
+    """Sector heat map.
+
+    Tries the Eastmoney sector API first, then falls back to computing heat
+    from the realtime quote feed plus the local industry map. The API lives on
+    push2.eastmoney.com, which is blocked on some networks, and when it fails
+    the old behaviour was to return {} — silently zeroing ``sector_heat_score``
+    for every stock (measured: 3018/3018 values were 0.0).
+
+    The local path needs no external service: ``stocks.industry`` is populated
+    for 3200/3207 stocks, and the quote feed is already in hand.
+    """
     try:
         from app.services import sector_service
 
@@ -82,9 +126,19 @@ async def _load_sector_heat() -> dict[str, float]:
             return await loop.run_in_executor(
                 None, sector_service.compute_sector_heat, sectors
             )
+        logger.info("Sector API returned nothing; using locally derived sector heat")
     except Exception as exc:
-        logger.warning(f"Sector heat preload failed, continuing without it: {exc}")
-    return {}
+        logger.info(f"Sector API unavailable ({exc}); using locally derived sector heat")
+
+    if not industry_map or not quotes:
+        return {}
+
+    from app.services.derived_metrics import compute_sector_heat_local
+
+    local = compute_sector_heat_local(quotes, industry_map)
+    if local:
+        logger.info(f"Derived sector heat locally for {len(local)} industries")
+    return local
 
 
 async def _compute_one(
@@ -94,6 +148,7 @@ async def _compute_one(
     sector_heat_map: dict[str, float],
     sem: asyncio.Semaphore,
     cancel_event: asyncio.Event | None = None,
+    quote_map: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Compute raw factors for a single stock using its OWN session."""
     from app.services.capital_flow import fetch_flow_and_chip
@@ -115,12 +170,22 @@ async def _compute_one(
         if df is None or df.empty:
             return []
 
-        loop = asyncio.get_running_loop()
-        flow_data = await loop.run_in_executor(None, lambda c=code: fetch_flow_and_chip(c))
+        # Skip the per-stock flow/chip fetch when both upstream sources are
+        # known-dead. Each call still costs 0.18-0.6 s of probing and parsing
+        # before returning nothing, which over 3000 stocks dominates the run.
+        # Derived metrics (from the quote feed and daily bars) stand in instead.
+        if _flow_sources_dead():
+            flow_data = {}
+        else:
+            loop = asyncio.get_running_loop()
+            flow_data = await loop.run_in_executor(
+                None, lambda c=code: fetch_flow_and_chip(c)
+            )
 
         sector_heat = sector_heat_map.get(industry_map.get(code) or "")
+        quote = (quote_map or {}).get(code)
         raw = compute_factors_for_stock(
-            df, code, fund_map.get(code), flow_data, sector_heat
+            df, code, fund_map.get(code), flow_data, sector_heat, quote
         )
         return raw or []
 
@@ -152,7 +217,20 @@ async def run_factor_pipeline(
     await ctx.report(0, total, f"待计算 {total} 只股票")
 
     # ---- Step 2: compute (concurrent, isolated sessions) ------------------
-    sector_heat_map = await _load_sector_heat()
+    # Realtime quotes, fetched ONCE for the whole run. They serve two purposes:
+    # annualising volume for derived flow metrics, and computing sector heat
+    # locally when the Eastmoney sector API (push2) is unreachable.
+    quote_map: dict[str, Any] = {}
+    try:
+        from app.services.quote_service import fetch_quotes
+
+        fetched = await fetch_quotes(codes)
+        quote_map = {c: q.to_dict() for c, q in fetched.items()}
+        logger.info(f"Factor run: using {len(quote_map)} realtime quotes")
+    except Exception as exc:
+        logger.warning(f"Quote preload failed, derived metrics will use daily bars only: {exc}")
+
+    sector_heat_map = await _load_sector_heat(industry_map, quote_map)
     ctx.raise_if_cancelled()
 
     sem = asyncio.Semaphore(max(1, concurrency))
@@ -168,7 +246,8 @@ async def run_factor_pipeline(
         ctx.raise_if_cancelled()
         try:
             raw = await _compute_one(
-                code, industry_map, fund_map, sector_heat_map, sem, ctx._cancel_event
+                code, industry_map, fund_map, sector_heat_map, sem,
+                ctx._cancel_event, quote_map,
             )
         except JobCancelled:
             raise

@@ -27,8 +27,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Realtime quote poller: keeps the whole market fresh in Redis during
     # trading hours and pushes deltas on the `quotes` WS channel.
-    from app.services import quote_poller
+    from app.services import daily_archiver, quote_poller
     quote_poller.start_poller()
+    # Keeps today's stock_daily bar current during the session (every 5 min),
+    # so factors and the screener are not stuck on yesterday's data until 15:05.
+    daily_archiver.start_archiver()
 
     # Warm the quote cache immediately so the first page load has data even
     # outside trading hours (upstream still returns the last close).
@@ -75,8 +78,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from app.services.data_service import shutdown_event as _shutdown_event
         _shutdown_event.set()
 
+        from app.services import daily_archiver as _da
         from app.services import quote_poller as _qp
         await _qp.stop_poller()
+        await _da.stop_archiver()
 
         from app.core.websocket import monitor_hub
         await monitor_hub.stop_broadcast_loop()

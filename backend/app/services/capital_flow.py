@@ -89,6 +89,48 @@ def _check_chip_host() -> bool:
     return _probe("datacenter-web.eastmoney.com", CHIP_URL)
 
 
+def both_sources_unavailable() -> bool:
+    """True when neither money flow nor chip data can be obtained.
+
+    Callers use this to skip the per-stock fetch entirely. Measured cost of
+    calling ``fetch_flow_and_chip`` 3000 times with both sources down:
+    ~0.18-0.6 s each, i.e. 9-30 minutes of pure waste per factor run — the
+    function still probes and parses only to discover it has nothing.
+    """
+    return not _check_eastmoney() and not _chip_report_usable()
+
+
+def _chip_report_usable() -> bool:
+    """Is the chip report still served upstream?
+
+    Probes the report directly rather than relying on ``_chip_retired_warned``:
+    that flag is only set *after* a fetch has failed, so a caller asking before
+    the first fetch would be told "usable" and then pay for a doomed request on
+    every stock.
+    """
+    if _chip_retired_warned:
+        return False
+    if not _check_chip_host():
+        return False
+
+    try:
+        resp = http_get(
+            CHIP_URL,
+            params={"reportName": CHIP_REPORT, "columns": "ALL", "pageSize": 1,
+                    "source": "WEB", "client": "WEB"},
+            timeout=5.0,
+            headers=HEADERS,
+        )
+        data = resp.json()
+    except Exception:
+        return False
+
+    if not data.get("success", True):
+        _warn_chip_retired(data.get("message"))
+        return False
+    return True
+
+
 # Announced once, not per stock: this runs for ~3000 stocks a night.
 _chip_retired_warned = False
 

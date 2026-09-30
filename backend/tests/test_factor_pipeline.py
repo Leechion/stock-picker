@@ -30,7 +30,7 @@ def fake_universe(monkeypatch):
     async def _load():
         return codes, industry, {}
 
-    async def _no_heat():
+    async def _no_heat(industry_map=None, quotes=None):
         return {}
 
     monkeypatch.setattr(factor_pipeline, "_load_universe", _load)
@@ -51,7 +51,7 @@ async def test_cancel_stops_promptly_midway(fake_universe, monkeypatch) -> None:
     ctx = JobContext(job_id=1, job_type="test")
 
     async def fake_compute_one(code, industry_map, fund_map, sector_heat, sem,
-                               cancel_event=None):
+                               cancel_event=None, quote_map=None):
         processed.append(code)
         # Flip the cancel flag partway through, deterministically, from inside a
         # worker — no sleeping, no timing races.
@@ -80,7 +80,7 @@ async def test_no_write_when_cancelled(fake_universe, monkeypatch) -> None:
     seen: list[str] = []
 
     async def fake_compute_one(code, industry_map, fund_map, sector_heat, sem,
-                               cancel_event=None):
+                               cancel_event=None, quote_map=None):
         seen.append(code)
         if len(seen) == 5:
             ctx._cancel_event.set()
@@ -101,7 +101,7 @@ async def test_no_write_when_cancelled(fake_universe, monkeypatch) -> None:
 async def test_completes_when_not_cancelled(fake_universe, monkeypatch) -> None:
     """Regression guard: the happy path must still finish and report progress."""
     async def fake_compute_one(code, industry_map, fund_map, sector_heat, sem,
-                               cancel_event=None):
+                               cancel_event=None, quote_map=None):
         return [{"factor_name": "x", "factor_type": "TECHNICAL", "value": 1.0}]
 
     monkeypatch.setattr(factor_pipeline, "_compute_one", fake_compute_one)
@@ -155,7 +155,7 @@ async def test_cancel_is_observed_inside_semaphore(fake_universe, monkeypatch) -
     ctx = JobContext(job_id=9, job_type="test")
 
     async def fake_compute_one(code, industry_map, fund_map, sector_heat, sem,
-                               cancel_event=None):
+                               cancel_event=None, quote_map=None):
         async with sem:
             # This mirrors the production placement of the check.
             if cancel_event is not None and cancel_event.is_set():
@@ -184,7 +184,7 @@ async def test_cancel_is_observed_inside_semaphore(fake_universe, monkeypatch) -
 async def test_worker_isolates_failures(fake_universe, monkeypatch) -> None:
     """One exploding stock must not abort the whole run."""
     async def flaky(code, industry_map, fund_map, sector_heat, sem,
-                    cancel_event=None):
+                    cancel_event=None, quote_map=None):
         if code.endswith("7"):
             raise RuntimeError("boom")
         return [{"factor_name": "x", "factor_type": "TECHNICAL", "value": 1.0}]
