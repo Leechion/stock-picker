@@ -8,7 +8,8 @@
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  Frontend (Vue 3)                                            │
-│    REST 查询/启动   +   WS /ws/monitor (job_progress)        │
+│    REST 查询/启动                                        │
+│    WS /ws/monitor: job_progress / quotes / positions …        │
 └───────────────┬──────────────────────────────────────────────┘
                 │
 ┌───────────────▼──────────────────────────────────────────────┐
@@ -130,7 +131,101 @@ cd backend
   只有明确的 best-effort 路径（Redis 不可用、外部行情源超时）才吞异常，
   且必定留痕
 
-## 6. 已知限制
+## 6. 实时行情层
+
+### 6.1 数据来源与实测约束
+
+腾讯批量行情接口 `http://qt.gtimg.cn/q=<code,code,...>`，实测：
+
+| 批量大小 | 结果 |
+|---|---|
+| ≤ 900 | 完整返回 |
+| 950 | **静默截断为 1 条**（HTTP 仍然 200） |
+| 3207（全市场，拆 7 请求） | **0.4–1.1 秒**，连续 70 次刷新 0 失败 |
+
+因此 `BATCH_SIZE = 500`，并**对每个响应做长度校验**——小于请求数即告警，
+否则截断会表现为"某些股票莫名其妙没有价格"。
+
+### 6.2 数据放在哪里
+
+```
+每 3 秒（仅交易时段）  →  7 个批量请求  →  3207 条行情
+                                          ├→ Redis  rt:quote:{code}  (TTL 30s)
+                                          ├→ 内存 _latest            (REST 直接读)
+                                          └→ WS `quotes` 推送「有变动的」
+```
+
+**行情只进 Redis，绝不写 SQLite。** 3 秒一次写 3207 行会与 SQLite 的
+单写者串行化，把 API 拖垮。Redis 带 TTL，所以轮询器挂掉只会"变旧"，
+不会"永远错误"。
+
+**只推变动项。** 每 3 秒把 3207 条全推给每个客户端约 400 KB/次；
+`_publish_changes` 只发价格真正变化的代码。
+
+### 6.3 交易时段
+
+`app/core/market_calendar.py` 判定 09:30–11:30 / 13:00–15:00（Asia/Shanghai）。
+**收盘后轮询器主动 idle**——非交易时段每 3 秒请求昨日收盘价纯属浪费。
+轮询窗口比交易时段略宽（09:15–15:05），保证开盘第一笔就是热的。
+
+> 未接入节假日日历：节假日会多打几个请求，但数据不会错（上游返回上一收盘价）。
+
+### 6.4 前端
+
+`useLiveQuotes(codesSource)` 组合式函数：
+
+1. 首屏用 REST `/api/quotes/` 拉一次（WebSocket 断开也能显示）
+2. 之后订阅 `quotes` 频道收增量
+3. 重连时自动重新订阅 + 重新同步（断线期间的增量会丢）
+4. 价格变动后单元格高亮 600ms，红涨绿跌（A 股习惯）
+
+`StockTable.vue` 已接入，所有使用该组件的视图自动获得实时价格，
+**无需手动点同步**。
+
+### 6.5 接口
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/quotes/?codes=a,b,c` | 指定代码的行情（读内存快照，不打上游） |
+| `GET /api/quotes/market` | 涨跌家数 + 轮询器健康状态 |
+| WS 频道 `quotes` | `{count, total, items:[{code,price,change_pct,…}]}` |
+
+### 6.6 ⚠️ macOS 代理环境导致的 httpx 全面失效（已修复）
+
+**这是本项目最隐蔽的一个坑，值得单独记录。**
+
+macOS 上 `urllib.request.getproxies()` 会读取系统配置，可能返回带方括号的
+IPv6 例外项：
+
+```
+{'no': 'localhost,127.0.0.1,::1,[::1]', 'http': 'http://127.0.0.1:7897', ...}
+```
+
+httpx 0.28.1 会把 `NO_PROXY` 的每一项丢给 `URLPattern` 解析，遇到 `[::1]`
+直接抛：
+
+```
+httpx.InvalidURL: Invalid port: ':1]'
+```
+
+**关键在于它发生在 `AsyncClient()` 的构造函数里**，早于任何请求。
+后果是进程中**所有** httpx 调用全部失败——不论同步异步、不论请求哪个 URL。
+而且报错信息极具误导性，实际表现为：
+
+- `[capital_flow] Eastmoney unreachable, skipping flow/chip data`
+- `Server disconnected without sending a response`
+- 行情/财务数据静默为空
+
+排查时很容易误判为"上游接口挂了"或"网络问题"，实则与网络无关。
+
+**修复**：`app/core/http.py::install_proxy_env_fix()` 去掉 IPv6 条目上的
+方括号，保留"回环地址不走代理"的原意。该函数在 `import app.core` 时自动执行。
+兜底：`async_client()` / `http_get()` 在构造失败时回退 `trust_env=False`。
+
+新增任何 HTTP 调用请使用 `app.core.http` 里的辅助函数，不要直接
+`httpx.AsyncClient(...)`，否则可能重新踩到这个环境坑。
+
+## 7. 已知限制
 
 | 限制 | 影响 | 正解方向 |
 |---|---|---|
@@ -140,7 +235,7 @@ cd backend
 | 无鉴权体系 | 所有 API 开放；WS 鉴权默认关闭 | 引入统一认证；`WS_AUTH_ENABLED=true` 启用现有开关 |
 | `main.py` 仍用 `create_all` | 与 Alembic 双写 schema 可能漂移 | 改为启动时 `alembic upgrade head` |
 
-## 7. 测试布局
+## 8. 测试布局
 
 | 文件 | 覆盖 |
 |---|---|
@@ -157,7 +252,7 @@ cd backend
 cd backend && .venv/bin/python -m pytest tests/ -q
 ```
 
-## 8. 新增一个长任务的步骤
+## 9. 新增一个长任务的步骤
 
 1. 在 `app/pipelines/` 写 pipeline，签名固定为 `(ctx: JobContext, **params)`
 2. 在函数体内用 `ctx.report(current, total, message)` 上报进度

@@ -33,6 +33,34 @@
         </template>
       </el-table-column>
 
+      <!-- Realtime columns: values come from the `quotes` WebSocket channel and
+           update without any user action. `flash` briefly highlights a cell. -->
+      <el-table-column label="现价" width="110" align="right">
+        <template #default="{ row }">
+          <span
+            v-if="quoteFor(row.code)?.price"
+            class="live-price"
+            :class="[{ 'is-flash': quoteFor(row.code)?.flash }, priceClass(quoteFor(row.code)?.change_pct)]"
+          >
+            {{ quoteFor(row.code)!.price.toFixed(2) }}
+          </span>
+          <span v-else class="text-dim">--</span>
+        </template>
+      </el-table-column>
+
+      <el-table-column label="涨跌幅" width="100" align="right">
+        <template #default="{ row }">
+          <span
+            v-if="quoteFor(row.code)?.change_pct !== undefined"
+            class="live-change"
+            :class="[{ 'is-flash': quoteFor(row.code)?.flash }, priceClass(quoteFor(row.code)?.change_pct)]"
+          >
+            {{ formatPct(quoteFor(row.code)!.change_pct) }}
+          </span>
+          <span v-else class="text-dim">--</span>
+        </template>
+      </el-table-column>
+
       <el-table-column label="综合评分" width="140" align="center" sortable :sort-method="(a: RankingItem, b: RankingItem) => (a.score ?? 0) - (b.score ?? 0)">
         <template #default="{ row }">
           <div class="score-cell">
@@ -92,7 +120,9 @@
 </template>
 
 <script lang="ts" setup>
+import { computed } from 'vue'
 import { getScoreColor, getRankBadgeClass } from '@/utils/format'
+import { useLiveQuotes } from '@/composables/useLiveQuotes'
 import type { RankingItem } from '@/types'
 
 const props = defineProps<{
@@ -128,6 +158,32 @@ function getIndustryTagType(industry: string | null | undefined): '' | 'success'
   if (finance.some((t) => industry.includes(t))) return 'warning'
   if (healthcare.some((t) => industry.includes(t))) return 'success'
   return 'info'
+}
+
+// ----------------------------------------------------------------------
+// Realtime prices
+// ----------------------------------------------------------------------
+// Subscribes to the `quotes` WS channel for whatever codes are on screen.
+// The server pushes only codes whose price moved, so this stays cheap even
+// though the market has ~3200 tickers.
+const visibleCodes = computed(() => props.data.map((r) => r.code))
+const { quotes: liveQuotes } = useLiveQuotes(() => visibleCodes.value)
+
+function quoteFor(code: string) {
+  return liveQuotes.value.get(code)
+}
+
+/** A-share convention: red = up, green = down. */
+function priceClass(changePct: number | undefined): string {
+  if (changePct === undefined || changePct === null) return ''
+  if (changePct > 0) return 'is-up'
+  if (changePct < 0) return 'is-down'
+  return 'is-flat'
+}
+
+function formatPct(v: number): string {
+  const sign = v > 0 ? '+' : ''
+  return `${sign}${v.toFixed(2)}%`
 }
 </script>
 
@@ -168,6 +224,30 @@ function getIndustryTagType(industry: string | null | undefined): '' | 'success'
   font-family: 'Fira Code', monospace;
   font-weight: 500;
   font-size: 13px;
+}
+
+/* Realtime quote cells ------------------------------------------------- */
+.live-price,
+.live-change {
+  font-family: 'Fira Code', monospace;
+  font-weight: 600;
+  font-size: 13px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: background-color 0.45s ease;
+}
+
+.live-price.is-up,
+.live-change.is-up { color: #f56c6c; }
+.live-price.is-down,
+.live-change.is-down { color: #67c23a; }
+.live-price.is-flat,
+.live-change.is-flat { color: #909399; }
+
+/* Brief highlight when a tick arrives, so movement is noticeable. */
+.live-price.is-flash,
+.live-change.is-flash {
+  background-color: rgba(64, 158, 255, 0.22);
 }
 
 .text-dim { color: rgba(248, 250, 252, 0.2); }

@@ -31,6 +31,30 @@ export type WSChannel =
   | 'alerts'
   | 'sync_progress'
   | 'job_progress'
+  | 'quotes'
+
+/** One price update inside a `quotes` push. */
+export interface WSQuoteItem {
+  code: string
+  price: number
+  change_pct: number
+  high: number
+  low: number
+  volume: number
+  amount: number
+}
+
+/**
+ * Payload pushed on the `quotes` channel.
+ *
+ * Only codes whose price MOVED since the previous tick are included — pushing
+ * all 3200 quotes every 3 seconds would be ~400 KB per client per tick.
+ */
+export interface WSQuotesPayload {
+  count: number
+  total: number
+  items: WSQuoteItem[]
+}
 
 export type JobStatus =
   | 'pending'

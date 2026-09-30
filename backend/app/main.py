@@ -9,7 +9,7 @@ from loguru import logger
 
 from app.core.config import settings
 from app.core.database import Base, engine
-from app.api import health, stocks, factors, ranking, strategy, sectors, backtest, trading, monitor, wechat, alerts, ai_picks, jobs
+from app.api import health, stocks, factors, ranking, strategy, sectors, backtest, trading, monitor, wechat, alerts, ai_picks, jobs, quotes
 
 
 @asynccontextmanager
@@ -25,9 +25,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from app.core.websocket import monitor_hub
     monitor_hub.start_broadcast_loop()
 
-    # Refresh live prices on startup if there are open positions
+    # Realtime quote poller: keeps the whole market fresh in Redis during
+    # trading hours and pushes deltas on the `quotes` WS channel.
+    from app.services import quote_poller
+    quote_poller.start_poller()
+
+    # Warm the quote cache immediately so the first page load has data even
+    # outside trading hours (upstream still returns the last close).
     import asyncio as _asyncio
 
+    async def _warm_quotes():
+        await _asyncio.sleep(2)
+        try:
+            quotes = await quote_poller.refresh_once()
+            logger.info(f"Startup: warmed {len(quotes)} realtime quotes")
+        except Exception as e:
+            logger.warning(f"Startup quote warm failed: {e}")
+
+    _asyncio.create_task(_warm_quotes())
+
+    # Refresh live prices on startup if there are open positions
     async def _startup_price_refresh():
         await _asyncio.sleep(1)
         try:
@@ -57,6 +74,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         from app.services.data_service import shutdown_event as _shutdown_event
         _shutdown_event.set()
+
+        from app.services import quote_poller as _qp
+        await _qp.stop_poller()
 
         from app.core.websocket import monitor_hub
         await monitor_hub.stop_broadcast_loop()
@@ -103,6 +123,7 @@ def create_app() -> FastAPI:
     # Job routes must be registered BEFORE ranking.router so that
     # `/jobs/...` is not shadowed by ranking's catch-all `/rankings/{code}`.
     app.include_router(jobs.router, prefix="/api")
+    app.include_router(quotes.router, prefix="/api")
 
     return app
 
