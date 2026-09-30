@@ -214,3 +214,108 @@ def test_chip_retired_warning_fires_once(monkeypatch) -> None:
 
     assert len(warnings) == 1, f"expected a single warning, got {len(warnings)}"
     assert "RPT_COST_CONC" in warnings[0]
+
+
+# ----------------------------------------------------------------------
+# Poller loop behaviour
+# ----------------------------------------------------------------------
+
+async def test_poll_loop_ticks_and_survives_errors(monkeypatch) -> None:
+    """The poll loop must keep ticking, and must not die on an upstream error.
+
+    A poller that silently stops is the worst failure mode here: prices just
+    freeze and nothing looks broken. Verified manually first (3 ticks in 10s,
+    ~3.5s intervals; survived 2 injected failures), now locked in.
+    """
+    import asyncio
+
+    from app.services import quote_poller as qp
+
+    attempts = {"n": 0}
+
+    async def flaky_refresh():
+        attempts["n"] += 1
+        if attempts["n"] <= 2:
+            raise RuntimeError("simulated upstream outage")
+        return {}
+
+    monkeypatch.setattr(qp, "should_poll_quotes", lambda dt=None: True)
+    monkeypatch.setattr(qp, "refresh_once", flaky_refresh)
+    monkeypatch.setattr(qp, "POLL_INTERVAL", 0.05)
+    monkeypatch.setattr(qp, "_stats", {"ticks": 0, "errors": 0, "last_at": None, "last_count": 0})
+
+    task = asyncio.create_task(qp._loop())
+    await asyncio.sleep(0.5)
+    alive = not task.done()
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert attempts["n"] >= 3, "loop stopped retrying after failures"
+    assert alive, "loop died on an upstream error"
+    assert qp.get_stats()["errors"] >= 2
+
+
+async def test_poller_idles_when_market_closed(monkeypatch) -> None:
+    """Outside market hours the poller must not hit the upstream at all."""
+    import asyncio
+
+    from app.services import quote_poller as qp
+
+    hits = {"n": 0}
+
+    async def counted_refresh():
+        hits["n"] += 1
+        return {}
+
+    monkeypatch.setattr(qp, "should_poll_quotes", lambda dt=None: False)
+    monkeypatch.setattr(qp, "refresh_once", counted_refresh)
+    monkeypatch.setattr(qp, "IDLE_INTERVAL", 0.05)
+
+    task = asyncio.create_task(qp._loop())
+    await asyncio.sleep(0.3)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert hits["n"] == 0, f"poller queried upstream {hits['n']}x while closed"
+
+
+async def test_publish_changes_only_sends_movers(monkeypatch) -> None:
+    """Identical ticks must publish nothing — 3207 quotes x 3s is ~400KB/client."""
+    from app.services import quote_poller as qp
+    from app.services.quote_service import Quote
+
+    sent: list = []
+
+    async def fake_broadcast(channel, data):
+        sent.append((channel, data))
+
+    import app.core.websocket as ws_mod
+
+    monkeypatch.setattr(ws_mod.monitor_hub, "broadcast", fake_broadcast)
+    monkeypatch.setattr(qp, "_last_prices", {}, raising=False)
+
+    def mk(price: float) -> dict[str, Quote]:
+        return {
+            "600519": Quote(
+                "600519", "贵州茅台", price, 1235.58, 1239.53,
+                1268.0, 1236.05, 38331.0, 479725.0, 1.86, 0.31, 19.32, 6.26, "ts",
+            )
+        }
+
+    await qp._publish_changes(mk(1258.62))
+    assert len(sent) == 1 and sent[0][0] == "quotes"
+    assert sent[0][1]["count"] == 1
+
+    sent.clear()
+    await qp._publish_changes(mk(1258.62))   # unchanged
+    assert sent == [], "unchanged prices were re-published"
+
+    sent.clear()
+    await qp._publish_changes(mk(1259.00))   # moved
+    assert len(sent) == 1, "a real price move was not published"
