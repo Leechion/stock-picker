@@ -161,3 +161,56 @@ async def test_async_client_helper_always_constructs() -> None:
         assert client is not None
     finally:
         await client.aclose()
+
+
+# ----------------------------------------------------------------------
+# Data-source reachability isolation
+# ----------------------------------------------------------------------
+
+def test_probe_hosts_are_independent(monkeypatch) -> None:
+    """One unreachable Eastmoney host must not disable the other.
+
+    Observed live: ``push2.eastmoney.com`` (money flow) was blocked on the
+    network while ``datacenter-web.eastmoney.com`` (chip) answered fine. The
+    original code probed only push2 and used that verdict to gate BOTH calls,
+    so working chip data was thrown away.
+    """
+    import app.services.capital_flow as cf
+
+    probed: list[str] = []
+
+    def fake_probe(host_key, url):
+        probed.append(host_key)
+        return host_key == "datacenter-web.eastmoney.com"
+
+    monkeypatch.setattr(cf, "_probe", fake_probe)
+    monkeypatch.setattr(cf, "_reachable", {}, raising=False)
+    monkeypatch.setattr(cf, "_last_probe", {}, raising=False)
+
+    # Rebind the two thin wrappers to the fake probe's semantics.
+    monkeypatch.setattr(cf, "_check_eastmoney", lambda: fake_probe("push2.eastmoney.com", cf.MONEYFLOW_URL))
+    monkeypatch.setattr(cf, "_check_chip_host", lambda: fake_probe("datacenter-web.eastmoney.com", cf.CHIP_URL))
+
+    assert cf._check_eastmoney() is False
+    assert cf._check_chip_host() is True
+    assert "datacenter-web.eastmoney.com" in probed
+
+
+def test_chip_retired_warning_fires_once(monkeypatch) -> None:
+    """A retired upstream report must warn once, not once per stock.
+
+    This runs over ~3000 stocks per night; per-stock warnings would bury the
+    log, and silence would make a dead report look like 'no data'.
+    """
+    import app.services.capital_flow as cf
+
+    warnings: list[str] = []
+    monkeypatch.setattr(cf.logger, "warning", lambda msg: warnings.append(str(msg)))
+    monkeypatch.setattr(cf, "_chip_retired_warned", False, raising=False)
+
+    cf._warn_chip_retired("报表配置不存在")
+    cf._warn_chip_retired("报表配置不存在")
+    cf._warn_chip_retired("报表配置不存在")
+
+    assert len(warnings) == 1, f"expected a single warning, got {len(warnings)}"
+    assert "RPT_COST_CONC" in warnings[0]
